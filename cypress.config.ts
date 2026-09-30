@@ -17,5 +17,7 @@ export default defineConfig({
     pageLoadTimeout: 120_000,
     defaultCommandTimeout: 10_000,
     video: false,
+    // Adds "Run all specs" to `npm run e2e:open`, to play every scenario back to back.
+    experimentalRunAllSpecs: true,
   },
 });

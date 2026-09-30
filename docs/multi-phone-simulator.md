@@ -22,6 +22,8 @@ npm run e2e        # start dispatch + web server, run every scenario headlessly,
 npm run e2e:open   # same, but in the Cypress UI so you can watch the phones
 ```
 
+In the Cypress UI, each scenario is its own spec; pick one to watch it, or use **Run all specs** to play them back to back. To run one scenario headlessly, start the servers (below) and run `npx cypress run --spec cypress/e2e/lowest-bid-wins.cy.ts`.
+
 To explore by hand, start the two servers yourself:
 
 ```bash
@@ -71,8 +73,22 @@ What each driver sees afterwards:
 | `src/app/driver.tsx`                   | Driver screen: offers, bid input, current job, result banner.               |
 | `src/components/RideMap.tsx` / `.web.tsx` | Native map, and a plain backdrop on web (`react-native-maps` has no web build). |
 | `public/sim.html`                      | The simulator page: phones as iframes plus the live dispatch panel.         |
-| `cypress/support/e2e.ts`               | Custom commands and network fixtures.                                       |
-| `cypress/e2e/auction.cy.ts`            | Auction scenarios.                                                          |
+| `cypress/support/e2e.ts`               | Custom commands, network fixtures, and `defineScenario`.                    |
+| `cypress/support/phones.ts`            | The shared cast: riders Alice and Bob; drivers Maria, James and Aisha.      |
+| `cypress/scenarios/<name>.ts`          | One scenario's steps and assertions.                                        |
+| `cypress/e2e/<name>.cy.ts`             | A thin spec that registers one scenario.                                    |
+
+### Scenarios
+
+| Spec                        | Checks                                                                         |
+| --------------------------- | ------------------------------------------------------------------------------ |
+| `lowest-bid-wins`           | Lowest bid wins, the losers are told, and the trip runs to "You've arrived".   |
+| `tie-goes-to-earlier-bid`   | Equal bids go to whoever bid first.                                            |
+| `bid-capped-at-quote`       | A bid above the rider's quoted fare can't be submitted.                        |
+| `auction-deadline`          | The auction closes on its deadline and a driver who never answered is told.    |
+| `every-driver-passes`       | The rider sees "No drivers available" and can request again.                   |
+| `rider-cancels`             | Cancelling withdraws the offer from every driver.                              |
+| `one-ride-per-driver`       | A driver who wins one ride isn't awarded another at the same time.             |
 
 ### Protocol
 
@@ -111,14 +127,14 @@ Environment variables: `PORT` (default 8787) and `AUCTION_MS` (default auction w
 
 ## Writing scenarios
 
+A scenario's steps live in `cypress/scenarios/`, apart from the spec file that runs them, so the same steps can back more than one spec. Add both files:
+
 ```ts
-import { tid, type PhoneSpec } from '../support/e2e';
+// cypress/scenarios/lowest-bid-wins.ts
+import { defineScenario, tid } from '../support/e2e';
+import { alice, james, maria } from '../support/phones';
 
-const alice: PhoneSpec = { role: 'rider', id: 'alice', name: 'Alice' };
-const maria: PhoneSpec = { role: 'driver', id: 'maria', name: 'Maria', plate: '7KDL294' };
-const james: PhoneSpec = { role: 'driver', id: 'james', name: 'James' };
-
-it('lowest bid wins', () => {
+export default defineScenario('lowest bid wins', () => {
   cy.resetDispatch();                          // always first: dispatch state outlives page loads
   cy.openPhones([alice, maria, james]);        // waits until every phone is rendered and connected
 
@@ -131,6 +147,15 @@ it('lowest bid wins', () => {
   cy.waitForDispatch((s) => s.rides[0]?.winnerId === 'james', 'james won');
 });
 ```
+
+```ts
+// cypress/e2e/lowest-bid-wins.cy.ts
+import scenario from '../scenarios/lowest-bid-wins';
+
+it(scenario.title, scenario.run);
+```
+
+Each scenario starts with `cy.resetDispatch()` and opens its own phones, so any spec can run alone or in any order.
 
 ### Commands
 

@@ -14,6 +14,14 @@ export type PhoneSpec = {
   rating?: number;
 };
 
+/**
+ * One multi-phone scenario. Scenarios live in cypress/scenarios/ and are registered by
+ * thin spec files in cypress/e2e/, so the same steps can back more than one spec.
+ */
+export type Scenario = { title: string; run: () => void };
+
+export const defineScenario = (title: string, run: () => void): Scenario => ({ title, run });
+
 export type DispatchState = {
   config: { auctionDurationMs: number };
   devices: (PhoneSpec & { online: boolean; busy: boolean })[];
