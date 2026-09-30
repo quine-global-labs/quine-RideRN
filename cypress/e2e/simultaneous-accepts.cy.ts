@@ -1,4 +1,4 @@
-import scenario from '../scenarios/tie-goes-to-earlier-bid';
+import scenario from '../scenarios/simultaneous-accepts';
 import { runScenario } from '../support/pace';
 
 runScenario(scenario);

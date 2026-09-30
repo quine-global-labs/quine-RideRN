@@ -23,18 +23,24 @@ export type Scenario = { title: string; run: () => void };
 export const defineScenario = (title: string, run: () => void): Scenario => ({ title, run });
 
 export type DispatchState = {
-  config: { auctionDurationMs: number };
+  policy: AuctionPolicy;
   devices: (PhoneSpec & { online: boolean; busy: boolean })[];
   rides: {
     id: string;
     riderId: string;
     status: 'auction' | 'matched' | 'completed' | 'unmatched' | 'cancelled';
     destination: string;
-    maxFare: number;
-    closesAt: number;
-    invited: string[];
-    bids: { driverId: string; amount: number; at: number }[];
-    declined: string[];
+    quotedFare: number;
+    rounds: {
+      number: number;
+      price: number;
+      final: boolean;
+      closesAt: number;
+      invited: string[];
+      declined: string[];
+      acceptedBy: string | null;
+      lateAccepts: string[];
+    }[];
     winnerId: string | null;
     fare: number | null;
   }[];
@@ -44,8 +50,11 @@ declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Cypress {
     interface Chainable {
-      /** Clear all rides on the dispatch server. `auctionDurationMs` sets the bidding window. */
-      resetDispatch(options?: { auctionDurationMs?: number }): Chainable<DispatchState>;
+      /**
+       * Clear all rides on the dispatch server and set its auction policy: TEST_POLICY,
+       * with any fields given here overriding it. roundDurationMs is stretched on slow runs.
+       */
+      resetDispatch(policy?: Partial<AuctionPolicy>): Chainable<DispatchState>;
       /** Load the simulator with these phones and wait until each is connected and on screen. */
       openPhones(phones: PhoneSpec[]): Chainable<void>;
       /** The <body> of one phone's iframe. */
@@ -55,27 +64,45 @@ declare global {
       waitForDispatch(check: (state: DispatchState) => boolean, description: string): Chainable<DispatchState>;
       /** Rider searches for a place, picks it, and requests the default ride type. */
       requestRide(riderId: string, query: string, placeTitle: string): Chainable<void>;
-      /** Driver enters a sealed bid. `rider` picks the offer when the driver has several. */
-      bid(driverId: string, amount: number, options?: { rider?: string }): Chainable<void>;
-      /** Driver passes on an offer. */
+      /** Driver accepts the suggested fare. `rider` picks the offer when the driver has several. */
+      accept(driverId: string, options?: { rider?: string }): Chainable<void>;
+      /** Driver passes on the suggested fare. */
       pass(driverId: string, options?: { rider?: string }): Chainable<void>;
+      /**
+       * Hold a phone's link to dispatch: it keeps running on what it last saw, what it sends
+       * is queued and what it receives is buffered. Use it to stage races.
+       */
+      pausePhone(id: string): Chainable<void>;
+      /** Send the phone's queued messages in order, then deliver what it missed. */
+      resumePhone(id: string): Chainable<void>;
     }
   }
 }
 
-import { isSlow, scaled, stepDelayMs, typeDelayMs } from './pace';
+import type { AuctionPolicy } from '../../src/lib/dispatch/protocol';
+import '../../src/lib/dispatch/testHooks';
+import { scaled, stepDelayMs, typeDelayMs } from './pace';
 
 /** Selector for a React Native `testID`, which react-native-web renders as data-testid. */
 export const tid = (id: string) => `[data-testid="${id}"]`;
 
 const dispatchUrl = () => Cypress.expose('dispatchUrl') as string;
 
-// The dispatch server's default auction window (AUCTION_MS); slow runs stretch it.
-const DEFAULT_AUCTION_MS = 15_000;
+/**
+ * The policy every scenario starts from, spelled out so tests don't depend on the server's
+ * defaults. With the fixture's $11.00 quote, rounds offer $8.80, $9.35, $9.90, $10.45, $11.00.
+ */
+export const TEST_POLICY: AuctionPolicy = {
+  startMultiplier: 0.8,
+  stepMultiplier: 0.05,
+  maxMultiplier: 1,
+  roundDurationMs: 15_000,
+};
 
-Cypress.Commands.add('resetDispatch', (options = {}) => {
-  const auctionDurationMs = options.auctionDurationMs ?? (isSlow() ? scaled(DEFAULT_AUCTION_MS) : undefined);
-  return cy.request('POST', `${dispatchUrl()}/test/reset`, { auctionDurationMs }).its('body');
+Cypress.Commands.add('resetDispatch', (overrides = {}) => {
+  const policy = { ...TEST_POLICY, ...overrides };
+  policy.roundDurationMs = scaled(policy.roundDurationMs);
+  return cy.request('POST', `${dispatchUrl()}/test/reset`, { policy }).its('body');
 });
 
 Cypress.Commands.add('dispatchState', () => {
@@ -145,9 +172,8 @@ function offerOn(driverId: string, rider?: string) {
   return rider ? offers.filter(`:contains("${rider} →")`).should('have.length', 1) : offers.should('have.length', 1);
 }
 
-Cypress.Commands.add('bid', (driverId, amount, options = {}) => {
-  offerOn(driverId, options.rider).find(tid('bid-input')).clear().type(amount.toFixed(2), { delay: typeDelayMs() });
-  offerOn(driverId, options.rider).find(tid('submit-bid')).click();
+Cypress.Commands.add('accept', (driverId, options = {}) => {
+  offerOn(driverId, options.rider).find(tid('accept-offer')).click();
 });
 
 Cypress.Commands.add('pass', (driverId, options = {}) => {
@@ -159,4 +185,28 @@ beforeEach(() => {
   // Ferry Building and every route is 5 km / 10 min (so UberX is quoted $11.00).
   cy.intercept('GET', /photon\.komoot\.io\/api/, { fixture: 'photon-ferry-building.json' });
   cy.intercept('GET', /router\.project-osrm\.org\/route/, { fixture: 'osrm-5km.json' });
+});
+
+function dispatchLink(id: string) {
+  return cy.phone(id).then((body) => {
+    const link = body[0].ownerDocument.defaultView?.__dispatchLink;
+    if (!link) throw new Error(`${id} has no dispatch link hook (web dev builds only)`);
+    return link;
+  });
+}
+
+function markPaused(id: string, paused: boolean) {
+  cy.get(`iframe[data-phone="${id}"]`, { log: false }).invoke({ log: false }, 'toggleClass', 'paused', paused);
+}
+
+Cypress.Commands.add('pausePhone', (id) => {
+  Cypress.log({ name: 'pausePhone', message: id });
+  dispatchLink(id).then((link) => link.hold());
+  markPaused(id, true);
+});
+
+Cypress.Commands.add('resumePhone', (id) => {
+  Cypress.log({ name: 'resumePhone', message: id });
+  dispatchLink(id).then((link) => link.release());
+  markPaused(id, false);
 });

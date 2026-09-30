@@ -1,12 +1,12 @@
 import { defineScenario, tid } from '../support/e2e';
-import { alice, maria, james } from '../support/phones';
+import { alice, james, maria } from '../support/phones';
 
 export default defineScenario('withdraws the offer from every driver when the rider cancels', () => {
   cy.resetDispatch();
   cy.openPhones([alice, maria, james]);
   cy.requestRide('alice', 'ferry', 'Ferry Building');
 
-  cy.bid('maria', 9);
+  cy.pass('maria');
   cy.phone('alice').find(tid('cancel-request')).click();
   cy.phone('alice').find(tid('confirm-ride')).should('exist');
 

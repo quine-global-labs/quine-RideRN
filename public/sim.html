@@ -55,6 +55,9 @@
       }
       /* Slow test runs mark the phone that's about to act. */
       .phone iframe.acting { border-color: #2563eb; }
+      /* A phone whose link to dispatch is held (cy.pausePhone). */
+      .phone iframe.paused { outline: 4px dashed #d97706; outline-offset: 3px; }
+      .phone:has(iframe.paused) .role::before { content: 'paused · '; color: #d97706; font-weight: 600; }
       aside {
         flex: none;
         width: 320px;
@@ -69,7 +72,7 @@
       .ride { border-top: 1px solid var(--border); padding: 8px 0; }
       .ride-head { display: flex; justify-content: space-between; font-weight: 600; }
       .status { font-size: 12px; padding: 1px 6px; border-radius: 4px; background: var(--bg); }
-      .bid { display: flex; justify-content: space-between; color: var(--muted); }
+      .bid { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); }
       .bid.winner { color: var(--win); font-weight: 600; }
       .device { display: flex; justify-content: space-between; color: var(--muted); }
       .empty { color: var(--muted); }
@@ -144,13 +147,15 @@
             const box = el('div', 'ride');
             const head = el('div', 'ride-head');
             head.append(el('span', '', `${ride.id} → ${ride.destination}`), el('span', 'status', ride.status));
-            box.append(head, el('div', 'empty', `rider ${ride.riderId} · max ${money(ride.maxFare)} · invited ${ride.invited.join(', ') || 'nobody'}`));
-            for (const bid of [...ride.bids].sort((a, b) => a.amount - b.amount)) {
-              const row = el('div', bid.driverId === ride.winnerId ? 'bid winner' : 'bid');
-              row.append(el('span', '', bid.driverId), el('span', '', money(bid.amount)));
+            box.append(head, el('div', 'empty', `rider ${ride.riderId} · quoted ${money(ride.quotedFare)}`));
+            for (const round of ride.rounds) {
+              const row = el('div', round.acceptedBy ? 'bid winner' : 'bid');
+              const outcome = round.acceptedBy
+                ? `accepted by ${round.acceptedBy}${round.lateAccepts.length ? ` · too late: ${round.lateAccepts.join(', ')}` : ''}`
+                : `offered to ${round.invited.join(', ') || 'nobody'}${round.declined.length ? ` · passed: ${round.declined.join(', ')}` : ''}`;
+              row.append(el('span', '', `Round ${round.number} · ${money(round.price)}${round.final ? ' (final)' : ''}`), el('span', '', outcome));
               box.append(row);
             }
-            for (const id of ride.declined) box.append(el('div', 'bid', `${id} passed`));
             body.append(box);
           }
         } catch {

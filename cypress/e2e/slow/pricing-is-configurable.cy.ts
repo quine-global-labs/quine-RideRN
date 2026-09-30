@@ -1,4 +1,4 @@
-import scenario from '../../scenarios/bid-capped-at-quote';
+import scenario from '../../scenarios/pricing-is-configurable';
 import { runScenario } from '../../support/pace';
 
 runScenario(scenario, 'slow');

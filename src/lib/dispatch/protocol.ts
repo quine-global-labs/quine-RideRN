@@ -21,20 +21,33 @@ export type RideRequest = {
   rideTypeId: string;
   distanceMeters: number;
   durationSeconds: number;
-  /** The fare quoted to the rider. Drivers can bid at or below it, never above. */
-  maxFare: number;
+  /** The fare quoted to the rider. Each round's suggested price is a multiple of it. */
+  quotedFare: number;
 };
 
 /**
- * auction   – drivers are submitting sealed bids
- * matched   – lowest bid won; the driver is on the way / on trip
+ * How a ride's price auction runs. Prices are multiples of the rider's quoted fare:
+ * round n suggests quote × (startMultiplier + (n − 1) × stepMultiplier), never above
+ * quote × maxMultiplier. When the round at the cap finds no taker, the ride is unmatched.
+ */
+export type AuctionPolicy = {
+  startMultiplier: number;
+  stepMultiplier: number;
+  /** null: keep raising the price until a driver accepts or the rider cancels. */
+  maxMultiplier: number | null;
+  roundDurationMs: number;
+};
+
+/**
+ * auction   – a round is open: drivers are being offered the current price
+ * matched   – a driver accepted; they're on the way / on trip
  * completed – the driver finished the trip
- * unmatched – the auction closed with no usable bid
+ * unmatched – the round at the price cap ended with no taker
  * cancelled – the rider cancelled during the auction
  */
 export type RideStatus = 'auction' | 'matched' | 'completed' | 'unmatched' | 'cancelled';
 
-/** What the rider sees about their own ride. Other drivers' bids are never exposed. */
+/** What the rider sees about their own ride. */
 export type RiderRideView = {
   id: string;
   status: RideStatus;
@@ -42,15 +55,17 @@ export type RiderRideView = {
   rideTypeId: string;
   distanceMeters: number;
   durationSeconds: number;
-  maxFare: number;
+  quotedFare: number;
+  /** The current (or, once over, the last) round and the price it offered drivers. */
+  round: number;
+  price: number;
   closesAt: number;
-  offerCount: number;
   fare: number | null;
   driver: Driver | null;
   completedAt: string | null;
 };
 
-/** An open auction a driver has been invited to. */
+/** The open round of an auction a driver has been invited to. */
 export type DriverOfferView = {
   rideId: string;
   riderName: string;
@@ -58,9 +73,11 @@ export type DriverOfferView = {
   rideTypeId: string;
   distanceMeters: number;
   durationSeconds: number;
-  maxFare: number;
+  round: number;
+  /** The suggested fare; the driver accepts it or passes. */
+  price: number;
   closesAt: number;
-  myBid: number | null;
+  /** The driver passed on this round; a later round may offer more. */
   declined: boolean;
 };
 
@@ -85,8 +102,8 @@ export type ClientMessage =
   | { type: 'cancelRide' }
   /** Rider has seen the final state of their ride (trip done, or no match) and wants it cleared. */
   | { type: 'ackRide' }
-  | { type: 'bid'; rideId: string; amount: number }
-  | { type: 'decline'; rideId: string }
+  | { type: 'accept'; rideId: string; round: number }
+  | { type: 'decline'; rideId: string; round: number }
   | { type: 'completeTrip'; rideId: string };
 
 export type ServerMessage = { type: 'snapshot'; snapshot: Snapshot } | { type: 'error'; message: string };

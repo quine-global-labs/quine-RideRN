@@ -118,7 +118,7 @@ export function RideProvider({ children }: { children: ReactNode }) {
         rideTypeId,
         distanceMeters: route.distanceMeters,
         durationSeconds: route.durationSeconds,
-        maxFare: priceFor(getRideType(rideTypeId), route),
+        quotedFare: priceFor(getRideType(rideTypeId), route),
       },
     });
     setRequestPending(sent);

@@ -1,5 +1,4 @@
-import { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useDispatch } from '@/lib/dispatch/DispatchContext';
@@ -41,10 +40,10 @@ export default function DriverScreen() {
       ) : driver?.offers.length ? (
         driver.offers.map((offer) => (
           <Offer
-            key={offer.rideId}
+            key={`${offer.rideId}:${offer.round}`}
             offer={offer}
-            onBid={(amount) => send({ type: 'bid', rideId: offer.rideId, amount })}
-            onDecline={() => send({ type: 'decline', rideId: offer.rideId })}
+            onAccept={() => send({ type: 'accept', rideId: offer.rideId, round: offer.round })}
+            onPass={() => send({ type: 'decline', rideId: offer.rideId, round: offer.round })}
           />
         ))
       ) : (
@@ -57,17 +56,15 @@ export default function DriverScreen() {
   );
 }
 
-function Offer({ offer, onBid, onDecline }: { offer: DriverOfferView; onBid: (amount: number) => void; onDecline: () => void }) {
+function Offer({ offer, onAccept, onPass }: { offer: DriverOfferView; onAccept: () => void; onPass: () => void }) {
   const secondsLeft = useSecondsLeft(offer.closesAt);
-  const [text, setText] = useState(offer.maxFare.toFixed(2));
-  const amount = Number(text);
-  const valid = amount > 0 && amount <= offer.maxFare;
-  const responded = offer.myBid !== null || offer.declined;
 
   return (
     <View style={styles.card} testID="offer">
       <View style={styles.cardHeader}>
-        <Text style={styles.cardTitle}>Ride request</Text>
+        <Text style={styles.cardTitle} testID="offer-round">
+          Ride request · round {offer.round}
+        </Text>
         <Text style={styles.muted}>{secondsLeft}s left</Text>
       </View>
       <Text style={styles.destination} testID="offer-destination">
@@ -76,47 +73,23 @@ function Offer({ offer, onBid, onDecline }: { offer: DriverOfferView; onBid: (am
       <Text style={styles.muted}>
         {getRideType(offer.rideTypeId).name} · {formatDistance(offer.distanceMeters)} · {formatDuration(offer.durationSeconds)}
       </Text>
-      <Text style={styles.maxFare} testID="offer-max-fare">
-        Rider pays up to {formatPrice(offer.maxFare)}
+      <Text style={styles.price} testID="offer-price">
+        {formatPrice(offer.price)}
       </Text>
 
-      {offer.myBid !== null ? (
-        <Text style={styles.responded} testID="offer-my-bid">
-          You bid {formatPrice(offer.myBid)} · waiting for the auction to close
+      {offer.declined ? (
+        <Text style={styles.responded} testID="offer-passed">
+          You passed at {formatPrice(offer.price)} · the price may go up if nobody takes it
         </Text>
-      ) : offer.declined ? (
-        <Text style={styles.responded}>You passed on this ride</Text>
-      ) : null}
-
-      {!responded && (
-        <>
-          <View style={styles.bidRow}>
-            <Text style={styles.currency}>$</Text>
-            <TextInput
-              style={styles.bidInput}
-              value={text}
-              onChangeText={setText}
-              keyboardType="decimal-pad"
-              selectTextOnFocus
-              accessibilityLabel="Your bid"
-              testID="bid-input"
-            />
-          </View>
-          <View style={styles.buttons}>
-            <Pressable style={[styles.button, styles.secondary]} onPress={onDecline} accessibilityRole="button" testID="decline-offer">
-              <Text style={styles.secondaryText}>Pass</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.button, styles.primary, !valid && styles.disabled]}
-              onPress={() => onBid(amount)}
-              disabled={!valid}
-              accessibilityRole="button"
-              testID="submit-bid"
-            >
-              <Text style={styles.primaryText}>Bid {valid ? formatPrice(amount) : ''}</Text>
-            </Pressable>
-          </View>
-        </>
+      ) : (
+        <View style={styles.buttons}>
+          <Pressable style={[styles.button, styles.secondary]} onPress={onPass} accessibilityRole="button" testID="decline-offer">
+            <Text style={styles.secondaryText}>Pass</Text>
+          </Pressable>
+          <Pressable style={[styles.button, styles.primary]} onPress={onAccept} accessibilityRole="button" testID="accept-offer">
+            <Text style={styles.primaryText}>Accept {formatPrice(offer.price)}</Text>
+          </Pressable>
+        </View>
       )}
     </View>
   );
@@ -129,7 +102,7 @@ function Job({ job, onComplete }: { job: DriverJobView; onComplete: () => void }
       <Text style={styles.destination}>
         Pick up {job.riderName} → {job.destination.title}
       </Text>
-      <Text style={styles.maxFare} testID="job-fare">
+      <Text style={styles.fare} testID="job-fare">
         Fare {formatPrice(job.fare)}
       </Text>
       <Pressable style={[styles.button, styles.primary]} onPress={onComplete} accessibilityRole="button" testID="complete-trip">
@@ -140,7 +113,7 @@ function Job({ job, onComplete }: { job: DriverJobView; onComplete: () => void }
 }
 
 const RESULT_TEXT: Record<DriverResult['outcome'], string> = {
-  lost: 'Another driver won that ride',
+  lost: 'Another driver took that ride',
   expired: 'That request closed before you answered',
   cancelled: 'The rider cancelled their request',
   completed: 'Trip complete',
@@ -171,17 +144,14 @@ const styles = StyleSheet.create({
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   cardTitle: { fontSize: 13, fontWeight: '600', color: '#666', textTransform: 'uppercase' },
   destination: { fontSize: 18, fontWeight: '600', color: '#111' },
-  maxFare: { fontSize: 16, color: '#111' },
+  price: { fontSize: 32, fontWeight: '700', color: '#111' },
+  fare: { fontSize: 16, color: '#111' },
   responded: { fontSize: 15, color: '#1a5f8f', fontWeight: '500' },
   won: { fontSize: 13, fontWeight: '700', color: '#1a8f3c', textTransform: 'uppercase' },
-  bidRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderRadius: 8, paddingHorizontal: 12, height: 48 },
-  currency: { fontSize: 20, color: '#111', marginRight: 4 },
-  bidInput: { flex: 1, fontSize: 20, fontWeight: '600', color: '#111', height: '100%' },
   buttons: { flexDirection: 'row', gap: 8 },
   button: { flex: 1, borderRadius: 10, paddingVertical: 14, alignItems: 'center' },
   primary: { backgroundColor: '#111' },
   primaryText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   secondary: { backgroundColor: '#e4e4e4' },
   secondaryText: { color: '#111', fontSize: 16, fontWeight: '600' },
-  disabled: { opacity: 0.4 },
 });

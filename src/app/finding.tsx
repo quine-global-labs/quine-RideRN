@@ -59,13 +59,15 @@ function Auction({ ride, onCancel }: { ride: RiderRideView; onCancel: () => void
   const secondsLeft = useSecondsLeft(ride.closesAt);
   return (
     <>
-      <Header title="Finding your driver" subtitle={`${tripLine(ride)} · up to ${formatPrice(ride.maxFare)}`} />
+      <Header title="Finding your driver" subtitle={`${tripLine(ride)} · quoted ${formatPrice(ride.quotedFare)}`} />
       <LottieView source={require('../../assets/lottie/finding-driver.json')} autoPlay loop style={styles.animation} />
       <View style={styles.auctionInfo}>
-        <Text style={styles.offers} testID="offer-count">
-          {ride.offerCount === 1 ? '1 offer' : `${ride.offerCount} offers`} so far
+        <Text style={styles.offers} testID="round-price">
+          Offering drivers {formatPrice(ride.price)}
         </Text>
-        <Text style={[styles.muted, styles.centered]}>Nearby drivers are bidding for your ride · {secondsLeft}s left</Text>
+        <Text style={[styles.muted, styles.centered]}>
+          <Text testID="round-number">Round {ride.round}</Text> · {secondsLeft}s left
+        </Text>
       </View>
       <Pressable style={styles.secondaryButton} onPress={onCancel} accessibilityRole="button" testID="cancel-request">
         <Text style={styles.secondaryButtonText}>Cancel request</Text>
@@ -77,7 +79,7 @@ function Auction({ ride, onCancel }: { ride: RiderRideView; onCancel: () => void
 function Matched({ ride }: { ride: RiderRideView }) {
   const { driver, fare } = ride;
   if (!driver || fare === null) return null;
-  const saved = ride.maxFare - fare;
+  const difference = fare - ride.quotedFare;
   return (
     <>
       <Header title="Driver found" subtitle={tripLine(ride)} />
@@ -85,7 +87,13 @@ function Matched({ ride }: { ride: RiderRideView }) {
         <Text style={styles.fare} testID="ride-fare">
           {formatPrice(fare)}
         </Text>
-        <Text style={[styles.muted, styles.centered]}>{saved > 0 ? `${formatPrice(saved)} below your quote` : 'Your quoted fare'}</Text>
+        <Text style={[styles.muted, styles.centered]} testID="fare-vs-quote">
+          {difference < 0
+            ? `${formatPrice(-difference)} below your quote`
+            : difference > 0
+              ? `${formatPrice(difference)} above your quote`
+              : 'Your quoted fare'}
+        </Text>
       </View>
       <View style={styles.card} testID="matched-driver">
         <View style={styles.avatar}>
@@ -106,7 +114,7 @@ function Matched({ ride }: { ride: RiderRideView }) {
 function Unmatched({ ride, onBack }: { ride: RiderRideView; onBack: () => void }) {
   return (
     <>
-      <Header title="No drivers available" subtitle={`No driver took ${tripLine(ride)} for ${formatPrice(ride.maxFare)} or less.`} />
+      <Header title="No drivers available" subtitle={`No driver took ${tripLine(ride)}, even at ${formatPrice(ride.price)}.`} />
       <Pressable style={styles.primaryButton} onPress={onBack} accessibilityRole="button" testID="unmatched-back">
         <Text style={styles.primaryButtonText}>Back</Text>
       </Pressable>

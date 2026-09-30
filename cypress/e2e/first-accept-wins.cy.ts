@@ -1,4 +1,4 @@
-import scenario from '../scenarios/every-driver-passes';
+import scenario from '../scenarios/first-accept-wins';
 import { runScenario } from '../support/pace';
 
 runScenario(scenario);

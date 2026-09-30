@@ -23,7 +23,7 @@ npm run e2e:open   # same, but in the Cypress UI so you can watch the phones
 npm run e2e:slow   # every scenario at watching speed, in a visible Chrome window
 ```
 
-In the Cypress UI, each scenario is its own spec, and `slow/` holds a slow version of each. Pick one to watch it, or use **Run all specs** to play them back to back. `npm run e2e` runs only the normal-speed specs. To run one scenario headlessly, start the servers (below) and run `npx cypress run --spec cypress/e2e/lowest-bid-wins.cy.ts`.
+In the Cypress UI, each scenario is its own spec, and `slow/` holds a slow version of each. Pick one to watch it, or use **Run all specs** to play them back to back. `npm run e2e` runs only the normal-speed specs. To run one scenario headlessly, start the servers (below) and run `npx cypress run --spec cypress/e2e/first-accept-wins.cy.ts`.
 
 To explore by hand, start the two servers yourself:
 
@@ -38,28 +38,51 @@ Then open <http://localhost:8090/sim.html?phones=rider:alice:Alice,driver:maria:
 
 ## How the auction works
 
-The dispatch server holds a sealed-bid auction:
+The dispatch server runs a rising-price auction in rounds:
 
-1. A rider requests a ride. The fare shown to them on the ride-options sheet becomes the **ceiling** (`maxFare`).
-2. Every driver who is **online and not on a trip** at that moment is invited. If none are, the auction closes immediately as `unmatched`.
-3. Each invited driver gets **one** response: a bid (more than $0, at or below the ceiling) or a pass. Drivers never see each other's bids.
-4. The auction closes when either:
-   - every invited driver has bid or passed (or is now on another trip), or
-   - the auction window runs out (15 s by default; see `auctionDurationMs`).
-5. The **lowest bid wins**, and a tie goes to the earliest bid. A bidder who won a different auction in the meantime is skipped. The rider pays the winning bid.
-6. The winning driver taps **Complete trip**. The rider's phone moves to "You've arrived", and the trip is saved to that rider's history.
+1. A rider requests a ride. The fare shown on the ride-options sheet becomes the **quote**.
+2. Round 1 opens. Every driver who is **online and not on a trip** is offered the same **suggested fare** and taps **Accept** or **Pass**. A driver who comes online mid-round is offered that round too.
+3. The **first driver to accept wins** at that round's price, and the auction ends immediately.
+4. A round ends with no taker when every driver in it has passed (or is now on another trip), or when its time runs out.
+5. Then the next round opens at a higher price and is offered again to every available driver, including those who passed.
+6. When a round at the **price cap** ends with no taker, the ride is `unmatched` and the rider sees "No drivers available". With no cap, rounds continue until someone accepts or the rider cancels.
+7. The winning driver taps **Complete trip**. The rider's phone moves to "You've arrived", and the trip is saved to that rider's history.
 
 Ride statuses: `auction` → `matched` → `completed`, or `auction` → `unmatched` / `cancelled`.
 
-What each driver sees afterwards:
+Each accept or pass names the round it answers. If the price moved on in the meantime, the server rejects it ("The price changed"), so no driver can accept a price they didn't see.
 
-| Situation                        | Driver banner                                   |
-| -------------------------------- | ----------------------------------------------- |
-| Bid but lost                     | "Another driver won that ride"                  |
-| Never answered before the window | "That request closed before you answered"       |
-| Rider cancelled                  | "The rider cancelled their request"             |
-| Passed                           | nothing (back to "Waiting for ride requests")   |
-| Won, then completed the trip     | "Trip complete · you earned $X"                 |
+When two drivers accept the same round, **whichever accept reaches the server first wins**. Later ones get "Another driver already took this ride" and are recorded on the round as `lateAccepts`, in arrival order.
+
+### Pricing policy
+
+There's no real pricing model yet, so the auction is driven by a configurable **policy**. Prices are multiples of the rider's quote:
+
+| Field             | Meaning                                                                  | Default   |
+| ----------------- | ------------------------------------------------------------------------ | --------- |
+| `startMultiplier` | Round 1 price = quote × this                                             | `0.8`     |
+| `stepMultiplier`  | Each later round adds quote × this                                       | `0.05`    |
+| `maxMultiplier`   | Cap = quote × this; the round that reaches it is the last. `null` = no cap | `1`       |
+| `roundDurationMs` | How long each round waits for an answer                                  | `15000`   |
+
+With the defaults and an $11.00 quote, rounds offer $8.80, $9.35, $9.90, $10.45 and $11.00, so the rider never pays more than quoted. Those numbers are placeholders, not a pricing decision.
+
+The policy can be set:
+
+- **When starting the server**, with `AUCTION_START`, `AUCTION_STEP`, `AUCTION_MAX` (`none` for no cap) and `AUCTION_ROUND_MS`.
+- **Per test**, with `POST /test/reset` (below) or `cy.resetDispatch({ ...overrides })`.
+
+Each ride keeps the policy it started with. `policyFor(request)` in `server/dispatch.mts` picks it; today it returns the one global policy, and it is the place to vary pricing by locality, ride type or time of day.
+
+What each driver sees after a ride is decided:
+
+| Situation                                   | Driver banner                                   |
+| ------------------------------------------- | ----------------------------------------------- |
+| Didn't answer and another driver accepted   | "Another driver took that ride"                 |
+| Didn't answer the final round               | "That request closed before you answered"       |
+| Rider cancelled                             | "The rider cancelled their request"             |
+| Passed                                      | nothing (back to "Waiting for ride requests")   |
+| Won, then completed the trip                | "Trip complete · you earned $X"                 |
 
 ## Pieces
 
@@ -68,10 +91,11 @@ What each driver sees afterwards:
 | `server/dispatch.mts`                  | Dispatch server: WebSocket for phones, HTTP for state and test control. Run directly by Node (type stripping, no build step). |
 | `src/lib/dispatch/protocol.ts`         | Message and snapshot types shared by the app and the server.                |
 | `src/lib/dispatch/device.ts`           | Who this phone is (from the URL on web) and where dispatch lives.           |
-| `src/lib/dispatch/DispatchContext.tsx` | WebSocket client: connects, says hello, reconnects, exposes the latest snapshot. |
+| `src/lib/dispatch/DispatchContext.tsx` | WebSocket client: connects, says hello, reconnects, exposes the latest snapshot. Also the pause hook (below). |
+| `src/lib/dispatch/testHooks.ts`        | Types for the test hooks on each phone's `window`.                           |
 | `src/lib/RideContext.tsx`              | Rider state: `requestRide`, `cancelRide`, `dismissRide` and `completeTrip` go through dispatch. |
 | `src/app/finding.tsx`                  | Rider's auction / driver found / no drivers screen.                         |
-| `src/app/driver.tsx`                   | Driver screen: offers, bid input, current job, result banner.               |
+| `src/app/driver.tsx`                   | Driver screen: suggested fare with Accept / Pass, current job, result banner. |
 | `src/components/RideMap.tsx` / `.web.tsx` | Native map, and a plain backdrop on web (`react-native-maps` has no web build). |
 | `public/sim.html`                      | The simulator page: phones as iframes plus the live dispatch panel.         |
 | `cypress/support/e2e.ts`               | Custom commands, network fixtures, and `defineScenario`.                    |
@@ -85,19 +109,20 @@ What each driver sees afterwards:
 
 | Spec                        | Checks                                                                         |
 | --------------------------- | ------------------------------------------------------------------------------ |
-| `lowest-bid-wins`           | Lowest bid wins, the losers are told, and the trip runs to "You've arrived".   |
-| `tie-goes-to-earlier-bid`   | Equal bids go to whoever bid first.                                            |
-| `bid-capped-at-quote`       | A bid above the rider's quoted fare can't be submitted.                        |
-| `auction-deadline`          | The auction closes on its deadline and a driver who never answered is told.    |
-| `every-driver-passes`       | The rider sees "No drivers available" and can request again.                   |
-| `rider-cancels`             | Cancelling withdraws the offer from every driver.                              |
-| `one-ride-per-driver`       | A driver who wins one ride isn't awarded another at the same time.             |
+| `first-accept-wins`                 | The first driver to accept wins, the others are told, and the trip runs to "You've arrived". |
+| `price-rises-when-everyone-passes`  | When every driver passes, a new round offers everyone a higher price.          |
+| `price-rises-when-round-times-out`  | A round that runs out of time is followed by a higher-priced one.              |
+| `unmatched-at-price-cap`            | Nobody takes the capped price: "No drivers available", then a fresh request starts over at round 1. |
+| `pricing-is-configurable`           | A policy that starts above the quote with no cap is followed, and the rider sees "above your quote". |
+| `rider-cancels`                     | Cancelling withdraws the offer from every driver.                              |
+| `one-ride-per-driver`               | A driver who takes one ride drops out of other auctions, including later rounds. |
+| `simultaneous-accepts`              | Two drivers accept at once: whoever reached dispatch first wins, even if they tapped second. |
 
 ### Protocol
 
 The server is the source of truth. After **every** change, it pushes a full snapshot to every connected device, so clients never have to replay missed events.
 
-- Client → server: `hello`, `requestRide`, `cancelRide`, `ackRide`, `bid`, `decline`, `completeTrip`
+- Client → server: `hello`, `requestRide`, `cancelRide`, `ackRide`, `accept`, `decline`, `completeTrip`
 - Server → client: `snapshot` (the rider's current ride, or the driver's offers, job and last result) and `error` (a rejected action, shown on screen)
 
 A rider's ride stays in their snapshot until they acknowledge it (`ackRide`: tapping **Done** on the trip screen or **Back** on "No drivers available").
@@ -122,46 +147,48 @@ A phone reads its identity from its URL once, at startup, before the router rewr
 
 | Method and path                 | Purpose                                                                 |
 | ------------------------------- | ----------------------------------------------------------------------- |
-| `GET /state`                    | Devices (online/busy), rides, bids, passes, winners, and config. Used by the simulator panel and by assertions. |
-| `POST /test/reset`              | Clears all rides and results. Body `{ "auctionDurationMs": 4000 }` sets the window (default 15000). Connected phones stay connected. |
-| `POST /test/rides/:id/close`    | Closes an auction now, as if its window ran out.                        |
+| `GET /state`                    | The policy, devices (online/busy), and every ride with its rounds (price, who was offered it, who passed, who accepted). Used by the simulator panel and by assertions. |
+| `POST /test/reset`              | Clears all rides and results and sets the policy: body `{ "policy": { "startMultiplier": 1.2, "maxMultiplier": null } }`. Fields left out take the server's defaults. Connected phones stay connected. |
+| `POST /test/rides/:id/end-round` | Ends the current round now, as if its time ran out.                   |
 
-Environment variables: `PORT` (default 8787) and `AUCTION_MS` (default auction window).
+Environment variables: `PORT` (default 8787), plus the policy variables above.
 
 ## Writing scenarios
 
 A scenario's steps live in `cypress/scenarios/`, apart from the spec file that runs them, so the same steps can back more than one spec. Add both files:
 
 ```ts
-// cypress/scenarios/lowest-bid-wins.ts
+// cypress/scenarios/second-round-wins.ts
 import { defineScenario, tid } from '../support/e2e';
 import { alice, james, maria } from '../support/phones';
 
-export default defineScenario('lowest bid wins', () => {
+export default defineScenario('second round wins', () => {
   cy.resetDispatch();                          // always first: dispatch state outlives page loads
   cy.openPhones([alice, maria, james]);        // waits until every phone is rendered and connected
 
   cy.requestRide('alice', 'ferry', 'Ferry Building');
-  cy.bid('maria', 10);
-  cy.bid('james', 8.5);                        // last answer closes the auction
+  cy.pass('maria');
+  cy.pass('james');                            // everyone passed: round 2 opens at once
 
-  cy.phone('alice').find(tid('ride-fare')).should('have.text', '$8.50');
-  cy.phone('maria').find(tid('driver-result')).should('have.text', 'Another driver won that ride');
+  cy.phone('james').find(tid('offer-price')).should('have.text', '$9.35');
+  cy.accept('james');
+
+  cy.phone('alice').find(tid('ride-fare')).should('have.text', '$9.35');
   cy.waitForDispatch((s) => s.rides[0]?.winnerId === 'james', 'james won');
 });
 ```
 
 ```ts
-// cypress/e2e/lowest-bid-wins.cy.ts
-import scenario from '../scenarios/lowest-bid-wins';
+// cypress/e2e/second-round-wins.cy.ts
+import scenario from '../scenarios/second-round-wins';
 import { runScenario } from '../support/pace';
 
 runScenario(scenario);
 ```
 
 ```ts
-// cypress/e2e/slow/lowest-bid-wins.cy.ts
-import scenario from '../../scenarios/lowest-bid-wins';
+// cypress/e2e/slow/second-round-wins.cy.ts
+import scenario from '../../scenarios/second-round-wins';
 import { runScenario } from '../../support/pace';
 
 runScenario(scenario, 'slow');
@@ -173,24 +200,45 @@ Each scenario starts with `cy.resetDispatch()` and opens its own phones, so any 
 
 | Command                                              | Does                                                                  |
 | ---------------------------------------------------- | --------------------------------------------------------------------- |
-| `cy.resetDispatch({ auctionDurationMs? })`           | `POST /test/reset`.                                                   |
+| `cy.resetDispatch(policyOverrides?)`                 | `POST /test/reset` with `TEST_POLICY` plus any overrides. `roundDurationMs` is stretched on slow runs. |
 | `cy.openPhones(phones)`                              | Loads `/sim.html` with those phones and waits until each is on screen and connected to dispatch. |
 | `cy.phone(id)`                                       | Yields that phone's `<body>`. Chain `.find(...)` / `.contains(...)` from it. |
 | `cy.requestRide(riderId, query, placeTitle)`         | Searches, picks the place, taps **Choose UberX**, waits for "Finding your driver". |
-| `cy.bid(driverId, amount, { rider? })`               | Enters and submits a bid. Pass `rider` (the rider's name) when the driver has several offers. |
-| `cy.pass(driverId, { rider? })`                      | Passes on an offer.                                                   |
+| `cy.accept(driverId, { rider? })`                    | Accepts the suggested fare. Pass `rider` (the rider's name) when the driver has several offers. |
+| `cy.pass(driverId, { rider? })`                      | Passes on the suggested fare.                                         |
+| `cy.pausePhone(id)`                                  | Holds that phone's link to dispatch (see below). The simulator marks it with a dashed amber outline. |
+| `cy.resumePhone(id)`                                 | Sends what the phone queued, in order, then delivers what it missed.  |
 | `cy.dispatchState()`                                 | `GET /state` once.                                                    |
 | `cy.waitForDispatch(check, description)`             | Polls `/state` until `check(state)` is true (fails after the command timeout). |
 | `tid(id)`                                            | Selector for a React Native `testID` (react-native-web renders it as `data-testid`). |
+
+### Pausing a phone to stage races
+
+Some bugs only show up when phones act on stale information, like two drivers accepting the same ride before either hears about the other. Normal Cypress steps run one after another, and each phone updates within milliseconds, so such races can't happen by accident in a test. Pausing a phone lets you set them up on purpose:
+
+- While a phone is **paused**, the app keeps running on the last state it saw. You can tap its buttons as usual, but what it sends is queued, and updates from dispatch are buffered.
+- **Resuming** sends its queued messages in order, then delivers the buffered updates, just as if its network had stalled and recovered.
+- The order you resume phones in is the order their messages reach dispatch. That lets a test choose who wins a race, whatever order the taps happened in.
+
+```ts
+cy.pausePhone('maria');
+cy.pausePhone('james');
+cy.accept('maria');            // taps first...
+cy.accept('james');
+cy.resumePhone('james');       // ...but James's accept reaches dispatch first
+cy.resumePhone('maria');       // Maria's arrives late: "Another driver already took this ride"
+```
+
+The hook is `window.__dispatchLink` (`hold()`, `release()`, `held`), set on each phone in web dev builds only. The connection itself stays open while paused, so dispatch still counts the phone as online.
 
 ### Test IDs
 
 | Screen              | IDs                                                                                     |
 | ------------------- | --------------------------------------------------------------------------------------- |
 | Home / search       | `where-to`, `destination-input`, `confirm-ride`, `price-<rideTypeId>`, `dispatch-error`  |
-| Rider: finding      | `ride-status`, `offer-count`, `cancel-request`, `ride-fare`, `matched-driver`, `driver-name`, `unmatched-back` |
+| Rider: finding      | `ride-status`, `round-price`, `round-number`, `cancel-request`, `ride-fare`, `fare-vs-quote`, `matched-driver`, `driver-name`, `unmatched-back` |
 | Rider: trip done    | `ride-status` ("You've arrived"), `trip-done`                                            |
-| Driver              | `driver-status`, `driver-idle`, `driver-error`, `driver-result`, `offer`, `offer-destination`, `offer-max-fare`, `offer-my-bid`, `bid-input`, `submit-bid`, `decline-offer`, `driver-job`, `job-fare`, `complete-trip` |
+| Driver              | `driver-status`, `driver-idle`, `driver-error`, `driver-result`, `offer`, `offer-round`, `offer-destination`, `offer-price`, `offer-passed`, `accept-offer`, `decline-offer`, `driver-job`, `job-fare`, `complete-trip` |
 
 When you add UI that a scenario needs to touch, give it a `testID` rather than matching on text or styles.
 
@@ -203,6 +251,8 @@ Place search (Photon) and routing (OSRM) are external services, so every test st
 
 So the quoted fares are: UberX **$11.00**, Comfort $14.00, UberXL $17.50, Black $26.00. To test other fares, add a fixture and override the intercept inside the test.
 
+Tests don't rely on the server's default policy. `cy.resetDispatch()` always sends `TEST_POLICY` from `cypress/support/e2e.ts` (the same values as the defaults), so UberX rounds offer **$8.80, $9.35, $9.90, $10.45, $11.00** however the server was started.
+
 ### Slow runs
 
 A slow spec plays the same steps for a human to follow:
@@ -210,22 +260,23 @@ A slow spec plays the same steps for a human to follow:
 - Every `cy.phone(...)` step pauses first (800 ms) and outlines that phone in blue in the simulator.
 - Typing is visible (150 ms per key).
 - Each scenario holds its final screen for 5 s before the next spec loads or the window closes.
-- Time windows are stretched 4×. `cy.resetDispatch()` without an explicit window gets 60 s instead of 15 s.
+- Time windows are stretched 4×. `cy.resetDispatch()` stretches `roundDurationMs` itself, so the default 15 s round becomes 60 s.
 
-Tune these in `PACES` in `cypress/support/pace.ts`. If a scenario depends on a time window, wrap the numbers in `scaled()` so it still holds when slow:
+Tune these in `PACES` in `cypress/support/pace.ts`. If a scenario waits on a round running out, wrap that assertion's timeout in `scaled()` so it still holds when slow:
 
 ```ts
-cy.resetDispatch({ auctionDurationMs: scaled(4000) });
-cy.phone('alice').find(tid('ride-status'), { timeout: scaled(8000) }).should('have.text', 'Driver found');
+cy.resetDispatch({ roundDurationMs: 3000 });   // stretched automatically
+cy.phone('alice').find(tid('round-number'), { timeout: scaled(8000) }).should('have.text', 'Round 2');
 ```
 
 Use `typeDelayMs()` for any `.type()` a scenario does directly. The pace is set when each test starts, so normal and slow specs can share one "Run all specs" session.
 
 ### Timing tips
 
-- Prefer letting every invited driver answer; the auction then closes at once, with no waiting.
-- To test the deadline, reset with a short window (`cy.resetDispatch({ auctionDurationMs: 4000 })`) and give the waiting assertion a longer `timeout`.
-- `cy.bid` doesn't assert anything after submitting, because the offer card disappears if that bid closes the auction. Assert the outcome on the phones you care about.
+- Prefer having every driver pass to move to the next round; it opens at once, with no waiting.
+- To test a round timing out, reset with a short round (`cy.resetDispatch({ roundDurationMs: 3000 })`) and give the waiting assertion a longer `timeout`.
+- `cy.accept` and `cy.pass` don't assert anything after tapping, because the offer card changes or disappears straight away. Assert the outcome on the phones you care about.
+- A short policy keeps cap tests quick, e.g. `{ startMultiplier: 0.9, stepMultiplier: 0.1, maxMultiplier: 1 }` gives just two rounds.
 
 ## Running the app on a device
 

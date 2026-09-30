@@ -1,5 +1,5 @@
 import { defineScenario, tid } from '../support/e2e';
-import { alice, bob, maria, james } from '../support/phones';
+import { alice, bob, james, maria } from '../support/phones';
 
 export default defineScenario('never gives one driver two rides at once', () => {
   cy.resetDispatch();
@@ -9,25 +9,24 @@ export default defineScenario('never gives one driver two rides at once', () => 
   cy.requestRide('bob', 'ferry', 'Ferry Building');
   cy.phone('maria').find(tid('offer')).should('have.length', 2);
 
-  // Maria is the cheapest on both rides.
-  cy.bid('maria', 7, { rider: 'Alice' });
-  cy.bid('maria', 6, { rider: 'Bob' });
-  cy.bid('james', 9, { rider: 'Bob' });
-
-  // Bob's auction has every answer, so it closes first and Maria wins it.
+  // Maria takes Bob's ride, so Alice's offer disappears from her phone.
+  cy.accept('maria', { rider: 'Bob' });
   cy.phone('bob').find(tid('driver-name')).should('contain.text', 'Maria');
-  cy.phone('bob').find(tid('ride-fare')).should('have.text', '$6.00');
+  cy.phone('maria').find(tid('driver-job')).should('contain.text', 'Bob');
+  cy.phone('maria').find(tid('offer')).should('not.exist');
 
-  // Alice's auction is still waiting on James. Maria's lower bid no longer counts.
-  cy.phone('alice').find(tid('ride-status')).should('have.text', 'Finding your driver');
-  cy.bid('james', 10, { rider: 'Alice' });
+  // Alice's round now only waits on James. When he passes, the next round skips Maria.
+  cy.pass('james', { rider: 'Alice' });
+  cy.phone('james').find(tid('offer-price')).should('have.text', '$9.35');
+  cy.accept('james', { rider: 'Alice' });
 
   cy.phone('alice').find(tid('driver-name')).should('contain.text', 'James');
-  cy.phone('alice').find(tid('ride-fare')).should('have.text', '$10.00');
+  cy.phone('alice').find(tid('ride-fare')).should('have.text', '$9.35');
   cy.waitForDispatch((s) => s.rides.every((r) => r.status === 'matched'), 'both rides matched').then(({ rides }) => {
     expect(rides.map((r) => [r.riderId, r.winnerId])).to.deep.equal([
       ['alice', 'james'],
       ['bob', 'maria'],
     ]);
+    expect(rides[0].rounds[1].invited).to.deep.equal(['james']);
   });
 });
