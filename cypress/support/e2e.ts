@@ -63,13 +63,19 @@ declare global {
   }
 }
 
+import { isSlow, scaled, stepDelayMs, typeDelayMs } from './pace';
+
 /** Selector for a React Native `testID`, which react-native-web renders as data-testid. */
 export const tid = (id: string) => `[data-testid="${id}"]`;
 
 const dispatchUrl = () => Cypress.expose('dispatchUrl') as string;
 
+// The dispatch server's default auction window (AUCTION_MS); slow runs stretch it.
+const DEFAULT_AUCTION_MS = 15_000;
+
 Cypress.Commands.add('resetDispatch', (options = {}) => {
-  return cy.request('POST', `${dispatchUrl()}/test/reset`, options).its('body');
+  const auctionDurationMs = options.auctionDurationMs ?? (isSlow() ? scaled(DEFAULT_AUCTION_MS) : undefined);
+  return cy.request('POST', `${dispatchUrl()}/test/reset`, { auctionDurationMs }).its('body');
 });
 
 Cypress.Commands.add('dispatchState', () => {
@@ -113,6 +119,13 @@ Cypress.Commands.add('openPhones', (phones) => {
 
 Cypress.Commands.add('phone', (id) => {
   Cypress.log({ name: 'phone', message: id });
+  if (stepDelayMs() > 0) {
+    // Show which phone is about to act, then give the viewer a moment to see it.
+    cy.get('iframe[data-phone]', { log: false }).then((frames) => {
+      frames.removeClass('acting').filter(`[data-phone="${id}"]`).addClass('acting');
+    });
+    cy.wait(stepDelayMs(), { log: false });
+  }
   return cy
     .get(`iframe[data-phone="${id}"]`, { log: false })
     .its('0.contentDocument.body', { log: false })
@@ -121,7 +134,7 @@ Cypress.Commands.add('phone', (id) => {
 
 Cypress.Commands.add('requestRide', (riderId, query, placeTitle) => {
   cy.phone(riderId).find(tid('where-to')).click();
-  cy.phone(riderId).find(tid('destination-input')).type(query);
+  cy.phone(riderId).find(tid('destination-input')).type(query, { delay: typeDelayMs() });
   cy.phone(riderId).contains(placeTitle).click();
   cy.phone(riderId).find(tid('confirm-ride')).click();
   cy.phone(riderId).find(tid('ride-status')).should('have.text', 'Finding your driver');
@@ -133,7 +146,7 @@ function offerOn(driverId: string, rider?: string) {
 }
 
 Cypress.Commands.add('bid', (driverId, amount, options = {}) => {
-  offerOn(driverId, options.rider).find(tid('bid-input')).clear().type(amount.toFixed(2));
+  offerOn(driverId, options.rider).find(tid('bid-input')).clear().type(amount.toFixed(2), { delay: typeDelayMs() });
   offerOn(driverId, options.rider).find(tid('submit-bid')).click();
 });
 

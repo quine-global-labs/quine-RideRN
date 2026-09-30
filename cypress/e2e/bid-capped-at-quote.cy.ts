@@ -1,3 +1,4 @@
 import scenario from '../scenarios/bid-capped-at-quote';
+import { runScenario } from '../support/pace';
 
-it(scenario.title, scenario.run);
+runScenario(scenario);

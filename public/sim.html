@@ -51,7 +51,10 @@
         border: 10px solid #111;
         border-radius: 36px;
         background: #fff;
+        transition: border-color 0.2s;
       }
+      /* Slow test runs mark the phone that's about to act. */
+      .phone iframe.acting { border-color: #2563eb; }
       aside {
         flex: none;
         width: 320px;

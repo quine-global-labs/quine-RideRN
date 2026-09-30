@@ -1,3 +1,4 @@
 import scenario from '../scenarios/auction-deadline';
+import { runScenario } from '../support/pace';
 
-it(scenario.title, scenario.run);
+runScenario(scenario);

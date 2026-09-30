@@ -39,8 +39,9 @@
     "lint": "expo lint",
     "dispatch": "node server/dispatch.mts",
     "sim:web": "expo start --port 8090",
-    "e2e": "start-server-and-test dispatch http-get://localhost:8787/state sim:web http://localhost:8090 'cypress run'",
-    "e2e:open": "start-server-and-test dispatch http-get://localhost:8787/state sim:web http://localhost:8090 'cypress open --e2e'"
+    "e2e": "start-server-and-test dispatch http-get://localhost:8787/state sim:web http://localhost:8090 'cypress run --spec \"cypress/e2e/*.cy.ts\"'",
+    "e2e:open": "start-server-and-test dispatch http-get://localhost:8787/state sim:web http://localhost:8090 'cypress open --e2e'",
+    "e2e:slow": "start-server-and-test dispatch http-get://localhost:8787/state sim:web http://localhost:8090 'cypress run --headed --browser chrome --spec \"cypress/e2e/slow/*.cy.ts\"'"
   },
   "private": true
 }

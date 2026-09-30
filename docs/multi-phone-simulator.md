@@ -20,9 +20,10 @@ This setup runs several "phones" at once in one browser, without iOS simulators,
 ```bash
 npm run e2e        # start dispatch + web server, run every scenario headlessly, shut down
 npm run e2e:open   # same, but in the Cypress UI so you can watch the phones
+npm run e2e:slow   # every scenario at watching speed, in a visible Chrome window
 ```
 
-In the Cypress UI, each scenario is its own spec; pick one to watch it, or use **Run all specs** to play them back to back. To run one scenario headlessly, start the servers (below) and run `npx cypress run --spec cypress/e2e/lowest-bid-wins.cy.ts`.
+In the Cypress UI, each scenario is its own spec, and `slow/` holds a slow version of each. Pick one to watch it, or use **Run all specs** to play them back to back. `npm run e2e` runs only the normal-speed specs. To run one scenario headlessly, start the servers (below) and run `npx cypress run --spec cypress/e2e/lowest-bid-wins.cy.ts`.
 
 To explore by hand, start the two servers yourself:
 
@@ -76,7 +77,9 @@ What each driver sees afterwards:
 | `cypress/support/e2e.ts`               | Custom commands, network fixtures, and `defineScenario`.                    |
 | `cypress/support/phones.ts`            | The shared cast: riders Alice and Bob; drivers Maria, James and Aisha.      |
 | `cypress/scenarios/<name>.ts`          | One scenario's steps and assertions.                                        |
-| `cypress/e2e/<name>.cy.ts`             | A thin spec that registers one scenario.                                    |
+| `cypress/e2e/<name>.cy.ts`             | A thin spec that registers one scenario at normal speed.                    |
+| `cypress/e2e/slow/<name>.cy.ts`        | The same scenario at watching speed.                                        |
+| `cypress/support/pace.ts`              | `runScenario`, pace settings, and `scaled()` for time windows.              |
 
 ### Scenarios
 
@@ -151,8 +154,17 @@ export default defineScenario('lowest bid wins', () => {
 ```ts
 // cypress/e2e/lowest-bid-wins.cy.ts
 import scenario from '../scenarios/lowest-bid-wins';
+import { runScenario } from '../support/pace';
 
-it(scenario.title, scenario.run);
+runScenario(scenario);
+```
+
+```ts
+// cypress/e2e/slow/lowest-bid-wins.cy.ts
+import scenario from '../../scenarios/lowest-bid-wins';
+import { runScenario } from '../../support/pace';
+
+runScenario(scenario, 'slow');
 ```
 
 Each scenario starts with `cy.resetDispatch()` and opens its own phones, so any spec can run alone or in any order.
@@ -190,6 +202,24 @@ Place search (Photon) and routing (OSRM) are external services, so every test st
 - Any route is **5 km / 10 min** (`cypress/fixtures/osrm-5km.json`).
 
 So the quoted fares are: UberX **$11.00**, Comfort $14.00, UberXL $17.50, Black $26.00. To test other fares, add a fixture and override the intercept inside the test.
+
+### Slow runs
+
+A slow spec plays the same steps for a human to follow:
+
+- Every `cy.phone(...)` step pauses first (800 ms) and outlines that phone in blue in the simulator.
+- Typing is visible (150 ms per key).
+- Each scenario holds its final screen for 5 s before the next spec loads or the window closes.
+- Time windows are stretched 4×. `cy.resetDispatch()` without an explicit window gets 60 s instead of 15 s.
+
+Tune these in `PACES` in `cypress/support/pace.ts`. If a scenario depends on a time window, wrap the numbers in `scaled()` so it still holds when slow:
+
+```ts
+cy.resetDispatch({ auctionDurationMs: scaled(4000) });
+cy.phone('alice').find(tid('ride-status'), { timeout: scaled(8000) }).should('have.text', 'Driver found');
+```
+
+Use `typeDelayMs()` for any `.type()` a scenario does directly. The pace is set when each test starts, so normal and slow specs can share one "Run all specs" session.
 
 ### Timing tips
 
