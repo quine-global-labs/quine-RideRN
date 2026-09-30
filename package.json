@@ -1,22 +1,46 @@
 {
   "name": "ridern",
   "version": "1.0.0",
-  "main": "index.ts",
+  "main": "expo-router/entry",
   "dependencies": {
+    "@expo/metro-runtime": "~57.0.16",
+    "@lottiefiles/dotlottie-react": "^0.13.5",
+    "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~57.0.25",
+    "expo-constants": "~57.0.19",
+    "expo-linking": "~57.0.11",
+    "expo-location": "~57.0.20",
+    "expo-router": "~57.0.23",
     "expo-status-bar": "~57.0.1",
+    "lottie-react-native": "~7.3.8",
     "react": "19.2.3",
-    "react-native": "0.86.3"
+    "react-dom": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-maps": "1.27.2",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.26.0",
+    "react-native-web": "^0.21.2"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
-    "typescript": "~6.0.3"
+    "@types/ws": "^8.18.2",
+    "cypress": "^16.1.0",
+    "eslint": "^9.0.0",
+    "eslint-config-expo": "~57.0.2",
+    "start-server-and-test": "^3.0.12",
+    "typescript": "~6.0.3",
+    "ws": "^8.22.0"
   },
   "scripts": {
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "lint": "expo lint",
+    "dispatch": "node server/dispatch.mts",
+    "sim:web": "expo start --port 8090",
+    "e2e": "start-server-and-test dispatch http-get://localhost:8787/state sim:web http://localhost:8090 'cypress run'",
+    "e2e:open": "start-server-and-test dispatch http-get://localhost:8787/state sim:web http://localhost:8090 'cypress open --e2e'"
   },
   "private": true
 }

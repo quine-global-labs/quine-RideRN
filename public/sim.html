@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Phone Simulator</title>
+    <!--
+      Multi-phone simulator. Each phone is the web build of the app in its own iframe,
+      configured by URL. Served from the Expo dev server so the iframes are same-origin
+      (Cypress can only reach into same-origin iframes).
+
+        /sim.html?phones=rider:alice:Alice,driver:maria:Maria,driver:james:James
+
+      Phone spec: role:id:name[:car[:plate[:rating]]]  (each part may be URL-encoded)
+      Optional: &dispatch=http://host:8787 (defaults to this host, port 8787)
+    -->
+    <style>
+      :root {
+        --bg: #f3f4f6;
+        --panel: #ffffff;
+        --text: #111827;
+        --muted: #6b7280;
+        --border: #e5e7eb;
+        --accent: #111827;
+        --win: #15803d;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      }
+      header {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border);
+        background: var(--panel);
+      }
+      header h1 { margin: 0; font-size: 16px; }
+      header span { color: var(--muted); }
+      main { display: flex; gap: 16px; padding: 16px; align-items: flex-start; overflow-x: auto; }
+      .phone { flex: none; display: flex; flex-direction: column; gap: 6px; }
+      .phone-label { display: flex; justify-content: space-between; font-weight: 600; padding: 0 4px; }
+      .phone-label .role { color: var(--muted); font-weight: 400; text-transform: uppercase; font-size: 12px; }
+      .phone iframe {
+        width: 360px;
+        height: 740px;
+        border: 10px solid #111;
+        border-radius: 36px;
+        background: #fff;
+      }
+      aside {
+        flex: none;
+        width: 320px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 12px;
+        max-height: 780px;
+        overflow: auto;
+      }
+      aside h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; color: var(--muted); }
+      .ride { border-top: 1px solid var(--border); padding: 8px 0; }
+      .ride-head { display: flex; justify-content: space-between; font-weight: 600; }
+      .status { font-size: 12px; padding: 1px 6px; border-radius: 4px; background: var(--bg); }
+      .bid { display: flex; justify-content: space-between; color: var(--muted); }
+      .bid.winner { color: var(--win); font-weight: 600; }
+      .device { display: flex; justify-content: space-between; color: var(--muted); }
+      .empty { color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>RideRN phone simulator</h1>
+      <span id="summary"></span>
+    </header>
+    <main id="phones">
+      <aside id="dispatch" data-testid="dispatch-panel">
+        <h2>Dispatch</h2>
+        <div id="dispatch-body" class="empty">Connecting…</div>
+      </aside>
+    </main>
+
+    <script>
+      const params = new URLSearchParams(location.search);
+      const dispatchUrl = params.get('dispatch') ?? `${location.protocol}//${location.hostname}:8787`;
+      const specs = (params.get('phones') ?? 'rider:rider-1:Rider,driver:driver-1:Driver')
+        .split(',')
+        .filter(Boolean)
+        .map((spec) => {
+          const [role, id, name, car, plate, rating] = spec.split(':').map(decodeURIComponent);
+          return { role: role === 'driver' ? 'driver' : 'rider', id, name: name || id, car, plate, rating };
+        });
+
+      const main = document.getElementById('phones');
+      for (const spec of specs) {
+        const query = new URLSearchParams({ device: spec.id, role: spec.role, name: spec.name });
+        for (const key of ['car', 'plate', 'rating']) if (spec[key]) query.set(key, spec[key]);
+        const path = spec.role === 'driver' ? '/driver' : '/';
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'phone';
+        const label = document.createElement('div');
+        label.className = 'phone-label';
+        label.innerHTML = `<span></span><span class="role"></span>`;
+        label.children[0].textContent = spec.name;
+        label.children[1].textContent = spec.role;
+        const frame = document.createElement('iframe');
+        frame.src = `${path}?${query}`;
+        frame.title = `${spec.name} (${spec.role})`;
+        frame.dataset.phone = spec.id;
+        wrapper.append(label, frame);
+        main.insertBefore(wrapper, document.getElementById('dispatch'));
+      }
+      document.getElementById('summary').textContent = `${specs.length} phones · dispatch ${dispatchUrl}`;
+
+      // Live view of the dispatch server, for humans watching a scenario run.
+      const body = document.getElementById('dispatch-body');
+      const money = (n) => `$${Number(n).toFixed(2)}`;
+      const el = (tag, cls, text) => {
+        const node = document.createElement(tag);
+        if (cls) node.className = cls;
+        if (text !== undefined) node.textContent = text;
+        return node;
+      };
+      async function poll() {
+        try {
+          const state = await (await fetch(`${dispatchUrl}/state`)).json();
+          body.className = '';
+          body.replaceChildren();
+          for (const d of state.devices) {
+            const row = el('div', 'device');
+            row.append(el('span', '', `${d.name} (${d.role})`), el('span', '', d.online ? (d.busy ? 'on trip' : 'online') : 'offline'));
+            body.append(row);
+          }
+          if (state.rides.length === 0) body.append(el('p', 'empty', 'No ride requests yet.'));
+          for (const ride of [...state.rides].reverse()) {
+            const box = el('div', 'ride');
+            const head = el('div', 'ride-head');
+            head.append(el('span', '', `${ride.id} → ${ride.destination}`), el('span', 'status', ride.status));
+            box.append(head, el('div', 'empty', `rider ${ride.riderId} · max ${money(ride.maxFare)} · invited ${ride.invited.join(', ') || 'nobody'}`));
+            for (const bid of [...ride.bids].sort((a, b) => a.amount - b.amount)) {
+              const row = el('div', bid.driverId === ride.winnerId ? 'bid winner' : 'bid');
+              row.append(el('span', '', bid.driverId), el('span', '', money(bid.amount)));
+              box.append(row);
+            }
+            for (const id of ride.declined) box.append(el('div', 'bid', `${id} passed`));
+            body.append(box);
+          }
+        } catch {
+          body.className = 'empty';
+          body.textContent = `Can't reach dispatch at ${dispatchUrl}`;
+        }
+        setTimeout(poll, 500);
+      }
+      poll();
+    </script>
+  </body>
+</html>
