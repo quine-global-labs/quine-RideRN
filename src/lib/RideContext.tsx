@@ -3,9 +3,9 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import { simulatedLocation } from './dispatch/device';
 import { useDispatch } from './dispatch/DispatchContext';
-import type { RiderRideView } from './dispatch/protocol';
+import type { Quote, RiderRideView } from './dispatch/protocol';
 import { DEFAULT_LOCATION } from './location';
-import { getRideType, priceFor, RIDE_TYPES } from './rideTypes';
+import { RIDE_TYPES } from './rideTypes';
 import { fetchRoute } from './route';
 import { saveTrip } from './storage';
 import type { Coord, Place, Route, Trip } from './types';
@@ -20,6 +20,8 @@ type RideState = {
   route: Route | null;
   routeLoading: boolean;
   rideTypeId: string;
+  /** Upfront prices from dispatch for the chosen destination, once it's routed. */
+  quote: Quote | null;
   /** The rider's current ride, as dispatch sees it. */
   ride: RiderRideView | null;
   /** A ride request was sent and dispatch hasn't answered yet. */
@@ -48,9 +50,12 @@ export function RideProvider({ children }: { children: ReactNode }) {
   const [rideTypeId, setRideTypeId] = useState(RIDE_TYPES[0].id);
   const [requestPending, setRequestPending] = useState(false);
 
-  const { snapshot, error: dispatchError, send } = useDispatch();
+  const { connected, snapshot, error: dispatchError, send } = useDispatch();
   const ride = snapshot?.role === 'rider' ? snapshot.ride : null;
   const requesting = requestPending && !ride && !dispatchError;
+  const latestQuote = snapshot?.role === 'rider' ? snapshot.quote : null;
+  // Only show prices for the destination on screen.
+  const quote = latestQuote && latestQuote.destinationId === destination?.id ? latestQuote : null;
 
   const pickup = userLocation ?? DEFAULT_LOCATION;
   const routeRequest = useRef<AbortController | null>(null);
@@ -109,22 +114,36 @@ export function RideProvider({ children }: { children: ReactNode }) {
     [pickup],
   );
 
+  // Ask dispatch to price each new route (picking the same place again is a new route, so
+  // prices are always current), and again whenever the quote expires. Not while a ride is
+  // underway: its price is already settled.
+  const needsQuote = connected && destination !== null && route !== null && !ride && !requestPending;
+  const quotedRoute = useRef<Route | null>(null);
+  const quoteExpiresAt = quote?.expiresAt;
+  useEffect(() => {
+    if (!needsQuote || !destination || !route) return;
+    const requestQuote = () =>
+      send({
+        type: 'requestQuote',
+        request: { pickup, destination, distanceMeters: route.distanceMeters, durationSeconds: route.durationSeconds },
+      });
+    if (quotedRoute.current !== route || quoteExpiresAt === undefined) {
+      quotedRoute.current = route;
+      requestQuote();
+      return;
+    }
+    const timer = setTimeout(requestQuote, Math.max(0, quoteExpiresAt - Date.now()));
+    return () => clearTimeout(timer);
+    // The pickup drifting doesn't re-price; a new destination or route does.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needsQuote, destination, route, quoteExpiresAt, send]);
+
   const requestRide = useCallback(() => {
-    if (!destination || !route) return false;
-    const sent = send({
-      type: 'requestRide',
-      request: {
-        pickup,
-        destination,
-        rideTypeId,
-        distanceMeters: route.distanceMeters,
-        durationSeconds: route.durationSeconds,
-        quotedFare: priceFor(getRideType(rideTypeId), route),
-      },
-    });
+    if (!quote) return false;
+    const sent = send({ type: 'requestRide', quoteId: quote.id, rideTypeId });
     setRequestPending(sent);
     return sent;
-  }, [destination, route, rideTypeId, pickup, send]);
+  }, [quote, rideTypeId, send]);
 
   const cancelRide = useCallback(() => {
     send({ type: 'cancelRide' });
@@ -152,6 +171,7 @@ export function RideProvider({ children }: { children: ReactNode }) {
       route,
       routeLoading,
       rideTypeId,
+      quote,
       ride,
       requesting,
       dispatchError,
@@ -170,6 +190,7 @@ export function RideProvider({ children }: { children: ReactNode }) {
       route,
       routeLoading,
       rideTypeId,
+      quote,
       ride,
       requesting,
       dispatchError,

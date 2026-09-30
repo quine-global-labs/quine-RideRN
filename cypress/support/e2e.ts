@@ -28,13 +28,16 @@ export const defineScenario = (title: string, run: () => void): Scenario => ({ t
 
 export type DispatchState = {
   policy: AuctionPolicy;
-  devices: (PhoneSpec & { online: boolean; driving: boolean; jobs: string[] })[];
+  pricing: PricingConfig;
+  devices: (PhoneSpec & { online: boolean; driving: boolean; jobs: string[]; position: { latitude: number; longitude: number } | null })[];
   rides: {
     id: string;
     riderId: string;
     status: 'auction' | 'matched' | 'completed' | 'unmatched' | 'cancelled';
     destination: string;
+    rideTypeId: string;
     quotedFare: number;
+    surge: number;
     pickup: { latitude: number; longitude: number };
     rounds: {
       number: number;
@@ -56,10 +59,13 @@ declare global {
   namespace Cypress {
     interface Chainable {
       /**
-       * Clear all rides on the dispatch server and set its auction policy: TEST_POLICY,
-       * with any fields given here overriding it. roundDurationMs is stretched on slow runs.
+       * Clear all rides on the dispatch server and configure it for a scenario:
+       * - policy: auction settings over TEST_POLICY (roundDurationMs is stretched on slow runs)
+       * - pricing: pricing settings over TEST_PRICING
+       * - rates: 'test' (default) for TEST_PRICING's simple UberX card, 'real' for the
+       *   server's actual rate cards
        */
-      resetDispatch(policy?: Partial<AuctionPolicy>): Chainable<DispatchState>;
+      resetDispatch(options?: ResetOptions): Chainable<DispatchState>;
       /** Load the simulator with these phones and wait until each is connected and on screen. */
       openPhones(phones: PhoneSpec[]): Chainable<void>;
       /** The <body> of one phone's iframe. */
@@ -88,7 +94,7 @@ declare global {
   }
 }
 
-import type { AuctionPolicy } from '../../src/lib/dispatch/protocol';
+import type { AuctionPolicy, PricingConfig, PricingOverrides } from '../../src/lib/dispatch/protocol';
 import '../../src/lib/dispatch/testHooks';
 import { scaled, stepDelayMs, typeDelayMs } from './pace';
 
@@ -108,10 +114,32 @@ export const TEST_POLICY: AuctionPolicy = {
   roundDurationMs: 15_000,
 };
 
-Cypress.Commands.add('resetDispatch', (overrides = {}) => {
-  const policy = { ...TEST_POLICY, ...overrides };
+/**
+ * Pricing every scenario starts from. The simple UberX card makes the fixture's 5 km,
+ * 10 min trip cost exactly $11.00 (2.50 + 10 × 0.85), and surge is off so prices don't
+ * depend on how many requests a scenario makes. Drivers earn the default 75%.
+ */
+export const TEST_PRICING: PricingOverrides = {
+  rateCards: { sf: { x: { baseFare: 2.5, perMile: 0, perMinute: 0.85, bookingFee: 0, minimumFare: 7 } } },
+  surge: { enabled: false },
+};
+
+export type ResetOptions = {
+  policy?: Partial<AuctionPolicy>;
+  pricing?: PricingOverrides;
+  rates?: 'test' | 'real';
+};
+
+Cypress.Commands.add('resetDispatch', ({ policy: policyOverrides = {}, pricing: pricingOverrides = {}, rates = 'test' } = {}) => {
+  const policy = { ...TEST_POLICY, ...policyOverrides };
   policy.roundDurationMs = scaled(policy.roundDurationMs);
-  return cy.request('POST', `${dispatchUrl()}/test/reset`, { policy }).its('body');
+  const pricing: PricingOverrides = {
+    rateCards: { ...(rates === 'test' ? TEST_PRICING.rateCards : {}), ...pricingOverrides.rateCards },
+    surge: { ...TEST_PRICING.surge, ...pricingOverrides.surge },
+    driverShare: pricingOverrides.driverShare,
+    quoteTtlMs: pricingOverrides.quoteTtlMs,
+  };
+  return cy.request('POST', `${dispatchUrl()}/test/reset`, { policy, pricing }).its('body');
 });
 
 Cypress.Commands.add('dispatchState', () => {

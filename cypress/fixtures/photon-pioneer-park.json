@@ -1,0 +1,16 @@
+{
+  "features": [
+    {
+      "geometry": { "coordinates": [-147.7747, 64.8387] },
+      "properties": {
+        "osm_id": 2001,
+        "osm_type": "W",
+        "name": "Pioneer Park",
+        "street": "Airport Way",
+        "city": "Fairbanks",
+        "state": "Alaska",
+        "country": "United States"
+      }
+    }
+  ]
+}

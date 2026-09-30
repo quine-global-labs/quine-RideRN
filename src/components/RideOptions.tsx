@@ -1,27 +1,31 @@
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { formatDistance, formatDuration, formatPrice, priceFor, RIDE_TYPES } from '@/lib/rideTypes';
+import type { Quote } from '@/lib/dispatch/protocol';
+import { formatDistance, formatDuration, formatPrice, RIDE_TYPES } from '@/lib/rideTypes';
 import type { Route } from '@/lib/types';
 
 type Props = {
   route: Route | null;
+  quote: Quote | null;
   loading: boolean;
   selectedId: string;
   onSelect: (id: string) => void;
   onConfirm: () => void;
 };
 
-export function RideOptions({ route, loading, selectedId, onSelect, onConfirm }: Props) {
-  if (loading || !route) {
+export function RideOptions({ route, quote, loading, selectedId, onSelect, onConfirm }: Props) {
+  if (loading || !route || !quote) {
     return (
       <View style={[styles.sheet, styles.loading]}>
         <ActivityIndicator color="#111" />
-        <Text style={styles.muted}>Finding the best route…</Text>
+        <Text style={styles.muted}>{loading || !route ? 'Finding the best route…' : 'Getting prices…'}</Text>
       </View>
     );
   }
 
-  const selected = RIDE_TYPES.find((r) => r.id === selectedId) ?? RIDE_TYPES[0];
+  // Only ride types priced in this city.
+  const available = RIDE_TYPES.filter((ride) => quote.fares[ride.id] !== undefined);
+  const selected = available.find((r) => r.id === selectedId) ?? available[0];
 
   return (
     <View style={styles.sheet}>
@@ -29,7 +33,12 @@ export function RideOptions({ route, loading, selectedId, onSelect, onConfirm }:
         {formatDistance(route.distanceMeters)} · {formatDuration(route.durationSeconds)}
         {route.approximate ? ' · estimate' : ''}
       </Text>
-      {RIDE_TYPES.map((ride) => {
+      {quote.surge > 1 && (
+        <Text style={styles.surge} testID="surge-notice">
+          Busy area · prices are {quote.surge}× higher right now
+        </Text>
+      )}
+      {available.map((ride) => {
         const isSelected = ride.id === selected.id;
         return (
           <Pressable
@@ -46,7 +55,9 @@ export function RideOptions({ route, loading, selectedId, onSelect, onConfirm }:
               </Text>
               <Text style={styles.muted}>{ride.description}</Text>
             </View>
-            <Text style={styles.price} testID={`price-${ride.id}`}>{formatPrice(priceFor(ride, route))}</Text>
+            <Text style={styles.price} testID={`price-${ride.id}`}>
+              {formatPrice(quote.fares[ride.id])}
+            </Text>
           </Pressable>
         );
       })}
@@ -71,6 +82,7 @@ const styles = StyleSheet.create({
     elevation: 12,
   },
   loading: { alignItems: 'center', gap: 8, paddingVertical: 32 },
+  surge: { backgroundColor: '#eaf1ff', color: '#1d4ed8', padding: 8, borderRadius: 8, overflow: 'hidden', textAlign: 'center', marginBottom: 6, fontWeight: '500' },
   tripMeta: { textAlign: 'center', color: '#555', marginBottom: 8, fontWeight: '500' },
   option: {
     flexDirection: 'row',

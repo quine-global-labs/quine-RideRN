@@ -3,7 +3,7 @@ import { alice, james, maria } from '../support/phones';
 
 export default defineScenario('gives up once nobody takes the capped price', () => {
   // 90% of the quote, then 100%, which is the cap: two rounds, $9.90 and $11.00.
-  cy.resetDispatch({ startMultiplier: 0.9, stepMultiplier: 0.1, maxMultiplier: 1 });
+  cy.resetDispatch({ policy: { startMultiplier: 0.9, stepMultiplier: 0.1, maxMultiplier: 1 } });
   cy.openPhones([alice, maria, james]);
   cy.requestRide('alice', 'ferry', 'Ferry Building');
 

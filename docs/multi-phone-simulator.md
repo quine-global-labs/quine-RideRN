@@ -61,7 +61,7 @@ Then open <http://localhost:8090/sim.html?phones=rider:alice:Alice,driver:maria:
 
 The dispatch server runs a rising-price auction in rounds:
 
-1. A rider requests a ride. The fare shown on the ride-options sheet becomes the **quote**.
+1. A rider picks a destination and dispatch quotes each ride type upfront (rate cards and surge; see [`pricing.md`](pricing.md)). Booking a ride type makes its quoted fare the **quote** the auction works from.
 2. Round 1 opens. Every **connected driver in driving mode with room for another ride** is offered the same **suggested fare** and taps **Accept** or **Pass**. A driver who becomes available mid-round (starts driving, reconnects, or finishes a trip) is offered that round too.
 3. The **first driver to accept wins** at that round's price, and the auction ends immediately.
 4. A round ends with no taker when every driver in it has passed (or has since gone offline or filled up), or when its time runs out.
@@ -127,6 +127,7 @@ What each driver sees after a ride is decided:
 | Path                                   | What it is                                                                  |
 | -------------------------------------- | --------------------------------------------------------------------------- |
 | `server/dispatch.mts`                  | Dispatch server: WebSocket for phones, HTTP for state and test control. Run directly by Node (type stripping, no build step). |
+| `server/pricing.mts`                   | The pricing model: rate cards, surge by zone, driver share ([`pricing.md`](pricing.md)). |
 | `src/lib/dispatch/protocol.ts`         | Message and snapshot types shared by the app and the server.                |
 | `src/lib/dispatch/device.ts`           | Which app this is, who this phone is (from the URL in the simulator), and where dispatch lives. |
 | `src/lib/dispatch/DispatchContext.tsx` | WebSocket client: connects, says hello, reconnects, exposes the latest snapshot. Also the pause hook (below). |
@@ -161,6 +162,9 @@ What each driver sees after a ride is decided:
 | `rider-cancels`                     | Cancelling withdraws the offer from every driver.                              |
 | `offline-drivers-get-no-requests`   | Only drivers in driving mode are asked; starting mid-round joins it, going offline mid-round leaves it. |
 | `offer-interrupts-driving`          | A request interrupts a waiting driver and a driver mid-ride; mid-ride, the directions keep running and accepting queues the ride; completing the trip moves on to it. |
+| `base-rates`                        | Quotes follow San Francisco's rate cards, and the driver sees and earns their 75% share. |
+| `fairbanks-rates`                   | A rider in Fairbanks gets Fairbanks prices (Comfort from Anchorage, no Black). |
+| `surge-pricing`                     | Prices surge where requests outnumber drivers, drop when another driver starts driving there, and don't reach other zones. |
 | `ride-queue-limit`                  | A driver can queue one ride behind the current one; when full they're skipped, and completing a trip lets them back in. |
 | `mocked-location`                   | A phone placed at Union Square uses that position for search, routing and its pickup, with no location prompt. |
 | `simultaneous-accepts`              | Two drivers accept at once: whoever reached dispatch first wins, even if they tapped second. |
@@ -169,8 +173,8 @@ What each driver sees after a ride is decided:
 
 The server is the source of truth. After **every** change, it pushes a full snapshot to every connected device, so clients never have to replay missed events.
 
-- Client → server: `hello`, `requestRide`, `cancelRide`, `ackRide`, `accept`, `decline`, `completeTrip`, `setDriving`
-- Server → client: `snapshot` (the rider's current ride; or the driver's driving mode, offers, current and queued job, and last result) and `error` (a rejected action, shown on screen)
+- Client → server: `hello`, `requestQuote`, `requestRide`, `cancelRide`, `ackRide`, `accept`, `decline`, `completeTrip`, `setDriving`, `setPosition`
+- Server → client: `snapshot` (the rider's latest quote and current ride; or the driver's driving mode, offers, current and queued job, and last result) and `error` (a rejected action, shown on screen)
 
 A rider's ride stays in their snapshot until they acknowledge it (`ackRide`: tapping **Done** on the trip screen or **Back** on "No drivers available").
 
@@ -200,8 +204,8 @@ A phone reads its identity from its URL once, at startup, before the router rewr
 
 | Method and path                 | Purpose                                                                 |
 | ------------------------------- | ----------------------------------------------------------------------- |
-| `GET /state`                    | The policy, devices (online; drivers also `driving` and their `jobs`), and every ride with its pickup and rounds (price, who was offered it, who passed, who accepted). Used by the simulator panel and by assertions. |
-| `POST /test/reset`              | Clears all rides and results and sets the policy: body `{ "policy": { "startMultiplier": 1.2, "maxMultiplier": null } }`. Fields left out take the server's defaults. Connected phones stay connected. |
+| `GET /state`                    | The policy and pricing, devices (online; drivers also `driving`, `jobs` and `position`), and every ride with its pickup, ride type, quoted fare, surge and rounds (price, who was offered it, who passed, who accepted). Used by the simulator panel and by assertions. |
+| `POST /test/reset`              | Clears all rides, quotes and results and configures the server: body `{ "policy": { "startMultiplier": 1.2 }, "pricing": { "surge": { "enabled": false } } }`. Anything left out takes the server's defaults. Connected phones stay connected. |
 | `POST /test/rides/:id/end-round` | Ends the current round now, as if its time ran out.                   |
 
 Environment variables: `PORT` (default 8787), plus the policy variables above.
@@ -253,7 +257,7 @@ Each scenario starts with `cy.resetDispatch()` and opens its own phones, so any 
 
 | Command                                              | Does                                                                  |
 | ---------------------------------------------------- | --------------------------------------------------------------------- |
-| `cy.resetDispatch(policyOverrides?)`                 | `POST /test/reset` with `TEST_POLICY` plus any overrides. `roundDurationMs` is stretched on slow runs. |
+| `cy.resetDispatch({ policy?, pricing?, rates? })`    | `POST /test/reset` with `TEST_POLICY` and `TEST_PRICING` plus any overrides; `rates: 'real'` uses the server's actual rate cards instead of the test card. `roundDurationMs` is stretched on slow runs. |
 | `cy.openPhones(phones)`                              | Loads `/sim.html` with those phones and waits until each is on screen, connected, and (drivers) in its starting mode. A phone spec can set `location` and, for drivers, `driving: false`. |
 | `cy.phone(id)`                                       | Yields that phone's `<body>`. Chain `.find(...)` / `.contains(...)` from it. |
 | `cy.requestRide(riderId, query, placeTitle)`         | Searches, picks the place, taps **Choose UberX**, waits for "Finding your driver". |
@@ -289,10 +293,10 @@ The hook is `window.__dispatchLink` (`hold()`, `release()`, `held`), set on each
 
 | Screen              | IDs                                                                                     |
 | ------------------- | --------------------------------------------------------------------------------------- |
-| Home / search       | `where-to`, `destination-input`, `confirm-ride`, `price-<rideTypeId>`, `dispatch-error`  |
+| Home / search       | `where-to`, `destination-input`, `clear-destination`, `confirm-ride`, `price-<rideTypeId>`, `surge-notice`, `dispatch-error`  |
 | Rider: finding      | `ride-status`, `round-price`, `round-number`, `cancel-request`, `ride-fare`, `fare-vs-quote`, `matched-driver`, `driver-name`, `driver-finishing`, `unmatched-back` |
 | Rider: trip done    | `ride-status` ("You've arrived"), `trip-done`                                            |
-| Driver              | `driver-offline`, `start-driving`, `stop-driving`, `driver-waiting`, `driver-navigation`, `nav-heading`, `nav-instruction`, `next-job`, `driver-status` (`Connecting…` / `Offline` / `Driving`), `driver-error`, `driver-result`, `offer-sheet`, `offer`, `offer-round`, `offer-destination`, `offer-price`, `offer-passed`, `accept-offer`, `decline-offer`, `driver-job`, `job-fare`, `complete-trip` |
+| Driver              | `driver-offline`, `start-driving`, `stop-driving`, `driver-waiting`, `driver-navigation`, `nav-heading`, `nav-instruction`, `next-job`, `driver-status` (`Connecting…` / `Offline` / `Driving`), `driver-error`, `driver-result`, `offer-sheet`, `offer`, `offer-round`, `offer-destination`, `offer-earnings`, `offer-price`, `offer-passed`, `accept-offer`, `decline-offer`, `driver-job`, `job-earnings`, `job-fare`, `complete-trip` |
 
 When you add UI that a scenario needs to touch, give it a `testID` rather than matching on text or styles.
 
@@ -305,7 +309,7 @@ Place search (Photon) and routing (OSRM) are external services, so every test st
 
 So the quoted fares are: UberX **$11.00**, Comfort $14.00, UberXL $17.50, Black $26.00. To test other fares, add a fixture and override the intercept inside the test.
 
-Tests don't rely on the server's default policy. `cy.resetDispatch()` always sends `TEST_POLICY` from `cypress/support/e2e.ts` (the same values as the defaults), so UberX rounds offer **$8.80, $9.35, $9.90, $10.45, $11.00** however the server was started.
+The quoted fares come from dispatch, and tests don't rely on its defaults. `cy.resetDispatch()` always sends `TEST_POLICY` and `TEST_PRICING` from `cypress/support/e2e.ts`: a simple UberX card ($2.50 + $0.85/min) that prices the fixture trip at exactly **$11.00**, with surge off. So UberX rounds offer **$8.80, $9.35, $9.90, $10.45, $11.00**, and drivers earn 75% of that (`offer-earnings`), however the server was started. Scenarios about the real rates or surge opt in (`rates: 'real'`, `pricing: { surge: { enabled: true } }`).
 
 ### Slow runs
 
@@ -319,7 +323,7 @@ A slow spec plays the same steps for a human to follow:
 Tune these in `PACES` in `cypress/support/pace.ts`. If a scenario waits on a round running out, wrap that assertion's timeout in `scaled()` so it still holds when slow:
 
 ```ts
-cy.resetDispatch({ roundDurationMs: 3000 });   // stretched automatically
+cy.resetDispatch({ policy: { roundDurationMs: 3000 } });   // stretched automatically
 cy.phone('alice').find(tid('round-number'), { timeout: scaled(8000) }).should('have.text', 'Round 2');
 ```
 
@@ -328,9 +332,9 @@ Use `typeDelayMs()` for any `.type()` a scenario does directly. The pace is set 
 ### Timing tips
 
 - Prefer having every driver pass to move to the next round; it opens at once, with no waiting.
-- To test a round timing out, reset with a short round (`cy.resetDispatch({ roundDurationMs: 3000 })`) and give the waiting assertion a longer `timeout`.
+- To test a round timing out, reset with a short round (`cy.resetDispatch({ policy: { roundDurationMs: 3000 } })`) and give the waiting assertion a longer `timeout`.
 - `cy.accept` and `cy.pass` don't assert anything after tapping, because the offer card changes or disappears straight away. Assert the outcome on the phones you care about.
-- A short policy keeps cap tests quick, e.g. `{ startMultiplier: 0.9, stepMultiplier: 0.1, maxMultiplier: 1 }` gives just two rounds.
+- A short policy keeps cap tests quick, e.g. `{ policy: { startMultiplier: 0.9, stepMultiplier: 0.1, maxMultiplier: 1 } }` gives just two rounds.
 
 ## Running the app on a device
 

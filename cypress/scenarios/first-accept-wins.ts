@@ -44,7 +44,7 @@ export default defineScenario('gives the ride to the first driver who accepts, a
 
   // The driver finishes the trip; the rider's phone follows.
   cy.phone('james').find(tid('complete-trip')).click();
-  cy.phone('james').find(tid('driver-result')).should('have.text', 'Trip complete · you earned $8.80');
+  cy.phone('james').find(tid('driver-result')).should('have.text', 'Trip complete · you earned $6.60');
   cy.phone('alice').find(tid('ride-status')).should('have.text', 'You’ve arrived');
   cy.phone('alice').should('contain.text', 'Thanks for riding with James.');
 

@@ -49,7 +49,7 @@ export default defineScenario('interrupts a waiting driver, and a driver mid-rid
   cy.pass('maria');
   cy.accept('james');
   cy.phone('james').find(tid('offer-sheet')).should('not.exist');
-  cy.phone('james').find(tid('next-job')).should('have.text', 'Next: Bob → Ferry Building · $8.80');
+  cy.phone('james').find(tid('next-job')).should('have.text', 'Next: Bob → Ferry Building · you earn $6.60');
   cy.phone('james')
     .find(tid('driver-navigation'))
     .should(([el]) => expect(el, 'navigation was never remounted').to.equal(navigation));

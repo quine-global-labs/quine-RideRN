@@ -3,7 +3,7 @@ import { alice, maria } from '../support/phones';
 
 export default defineScenario('follows the configured pricing, including above the quote', () => {
   // Start at 120% of the quote, add 10% a round, no cap.
-  cy.resetDispatch({ startMultiplier: 1.2, stepMultiplier: 0.1, maxMultiplier: null });
+  cy.resetDispatch({ policy: { startMultiplier: 1.2, stepMultiplier: 0.1, maxMultiplier: null } });
   cy.openPhones([alice, maria]);
   cy.requestRide('alice', 'ferry', 'Ferry Building');
 

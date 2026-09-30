@@ -24,6 +24,11 @@ export default function DriverScreen() {
     if (connected) send({ type: 'setDriving', driving });
   }, [connected, driving, send]);
 
+  // Where the driver is counts toward supply in that surge zone.
+  useEffect(() => {
+    if (connected) send({ type: 'setPosition', position });
+  }, [connected, position, send]);
+
   const driver = snapshot?.role === 'driver' ? snapshot : null;
   const job = driver?.job ?? null;
   const nextJob = driver?.nextJob ?? null;
@@ -46,7 +51,7 @@ export default function DriverScreen() {
         {job && <Job job={job} onComplete={() => send({ type: 'completeTrip', rideId: job.rideId })} />}
         {nextJob && (
           <Text style={styles.next} testID="next-job">
-            Next: {nextJob.riderName} → {nextJob.destination.title} · {formatPrice(nextJob.fare)}
+            Next: {nextJob.riderName} → {nextJob.destination.title} · you earn {formatPrice(nextJob.earnings)}
           </Text>
         )}
         {!job &&
@@ -156,16 +161,21 @@ function Offer({ offer, onAccept, onPass }: { offer: DriverOfferView; onAccept: 
       <Text style={styles.muted}>
         {getRideType(offer.rideTypeId).name} · {formatDistance(offer.distanceMeters)} · {formatDuration(offer.durationSeconds)}
       </Text>
-      <Text style={styles.price} testID="offer-price">
-        {formatPrice(offer.price)}
-      </Text>
+      <View>
+        <Text style={styles.price} testID="offer-earnings">
+          {formatPrice(offer.earnings)}
+        </Text>
+        <Text style={styles.muted}>
+          You earn · rider pays <Text testID="offer-price">{formatPrice(offer.price)}</Text>
+        </Text>
+      </View>
 
       <View style={styles.buttons}>
         <Pressable style={[styles.button, styles.secondary]} onPress={onPass} accessibilityRole="button" testID="decline-offer">
           <Text style={styles.secondaryText}>Pass</Text>
         </Pressable>
         <Pressable style={[styles.button, styles.primary]} onPress={onAccept} accessibilityRole="button" testID="accept-offer">
-          <Text style={styles.primaryText}>Accept {formatPrice(offer.price)}</Text>
+          <Text style={styles.primaryText}>Accept</Text>
         </Pressable>
       </View>
     </View>
@@ -179,7 +189,10 @@ function Job({ job, onComplete }: { job: DriverJobView; onComplete: () => void }
       <Text style={styles.destination}>
         {job.riderName} → {job.destination.title}
       </Text>
-      <Text style={styles.fare} testID="job-fare">
+      <Text style={styles.fare} testID="job-earnings">
+        You earn {formatPrice(job.earnings)}
+      </Text>
+      <Text style={styles.muted} testID="job-fare">
         Fare {formatPrice(job.fare)}
       </Text>
       <Pressable style={[styles.button, styles.primary]} onPress={onComplete} accessibilityRole="button" testID="complete-trip">
@@ -200,7 +213,7 @@ function ResultBanner({ result }: { result: DriverResult }) {
   return (
     <Text style={styles.banner} testID="driver-result">
       {RESULT_TEXT[result.outcome]}
-      {result.outcome === 'completed' ? ` · you earned ${formatPrice(result.fare)}` : ''}
+      {result.outcome === 'completed' ? ` · you earned ${formatPrice(result.earnings)}` : ''}
     </Text>
   );
 }

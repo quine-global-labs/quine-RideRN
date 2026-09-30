@@ -7,12 +7,17 @@
 // at a higher price, until a driver accepts or the price cap is reached. Prices, step,
 // cap and round length come from the auction policy (see AuctionPolicy).
 //
+// What the rider is quoted comes from the pricing model (pricing.mts): rate cards, surge
+// by zone, and the driver's share. Riders ask for a quote, then book against it.
+//
 // Phones talk to it over a WebSocket; each change pushes a fresh snapshot to every device.
 // A small HTTP API (GET /state, POST /test/*) lets test scenarios reset and inspect it.
 //
 // Run: node server/dispatch.mts
-// Env: PORT, AUCTION_START, AUCTION_STEP, AUCTION_MAX ("none" for no cap), AUCTION_ROUND_MS
+// Env: PORT, AUCTION_START, AUCTION_STEP, AUCTION_MAX ("none" for no cap), AUCTION_ROUND_MS,
+//      PRICING_FILE (JSON of pricing overrides, e.g. other cities' rate cards)
 
+import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 
@@ -21,11 +26,25 @@ import type {
   ClientMessage,
   DeviceProfile,
   DriverResult,
-  RideRequest,
+  PricingConfig,
+  PricingOverrides,
+  Quote,
+  QuoteRequest,
   RideStatus,
   ServerMessage,
   Snapshot,
 } from '../src/lib/dispatch/protocol';
+import type { Coord, Place } from '../src/lib/types';
+import {
+  DEFAULT_PRICING,
+  earningsFor,
+  fareFor,
+  marketFor,
+  mergePricing,
+  surgeMultiplier,
+  validatePricing,
+  zoneOf,
+} from './pricing.mts';
 
 const PORT = Number(process.env.PORT ?? 8787);
 
@@ -40,6 +59,25 @@ const DEFAULT_POLICY: AuctionPolicy = {
   maxMultiplier: process.env.AUCTION_MAX === 'none' ? null : Number(process.env.AUCTION_MAX ?? 1),
   roundDurationMs: Number(process.env.AUCTION_ROUND_MS ?? 15_000),
 };
+
+// Pricing as the server starts: the defaults, plus any overrides from PRICING_FILE.
+const STARTUP_PRICING = mergePricing(
+  DEFAULT_PRICING,
+  process.env.PRICING_FILE ? (JSON.parse(readFileSync(process.env.PRICING_FILE, 'utf8')) as PricingOverrides) : {},
+);
+
+type RideRequest = {
+  pickup: Coord;
+  destination: Place;
+  rideTypeId: string;
+  distanceMeters: number;
+  durationSeconds: number;
+  /** What the rider was quoted for this ride type. Each round's price is a multiple of it. */
+  quotedFare: number;
+  surge: number;
+};
+
+type StoredQuote = Quote & { riderId: string; request: QuoteRequest };
 
 type Round = {
   number: number;
@@ -76,13 +114,21 @@ type Device = {
   sockets: Set<WebSocket>;
   /** Drivers only: in driving mode, i.e. taking ride requests. */
   driving: boolean;
+  /** Drivers only: last reported position, for counting supply by surge zone. */
+  position: Coord | null;
 };
 
 let policy: AuctionPolicy = { ...DEFAULT_POLICY };
+let pricing: PricingConfig = STARTUP_PRICING;
 const devices = new Map<string, Device>();
 const rides = new Map<string, Ride>();
 const lastResults = new Map<string, DriverResult>();
+const quotes = new Map<string, StoredQuote>();
+/** When and where rides were requested, for surge demand. */
+let requestLog: { at: number; zone: string }[] = [];
+const surgeCache = new Map<string, { multiplier: number; at: number }>();
 let nextRideId = 1;
+let nextQuoteId = 1;
 
 // ---------------------------------------------------------------------------
 // Pricing
@@ -113,6 +159,50 @@ function roundPrice(ride: Ride, number: number): { price: number; final: boolean
 }
 
 // ---------------------------------------------------------------------------
+// Surge and quotes
+
+function surgeIn(zone: string): number {
+  const now = Date.now();
+  const cached = surgeCache.get(zone);
+  if (cached && now - cached.at < pricing.surge.intervalMs) return cached.multiplier;
+
+  requestLog = requestLog.filter((r) => now - r.at < pricing.surge.demandWindowMs);
+  const demand = requestLog.filter((r) => r.zone === zone).length;
+  const supply = [...devices.values()].filter(
+    (d) => d.profile.role === 'driver' && d.position && zoneOf(d.position, pricing.surge) === zone && isAvailable(d.profile.id),
+  ).length;
+  const multiplier = surgeMultiplier(demand, supply, pricing.surge);
+  surgeCache.set(zone, { multiplier, at: now });
+  return multiplier;
+}
+
+function quote(riderId: string, request: QuoteRequest): StoredQuote {
+  const surge = surgeIn(zoneOf(request.pickup, pricing.surge));
+  const cards = pricing.rateCards[marketFor(request.pickup, pricing)];
+  const fares = Object.fromEntries(
+    Object.entries(cards).map(([type, card]) => [type, fareFor(card, request.distanceMeters, request.durationSeconds, surge)]),
+  );
+  const stored: StoredQuote = {
+    id: `quote-${nextQuoteId++}`,
+    destinationId: request.destination.id,
+    surge,
+    expiresAt: Date.now() + pricing.quoteTtlMs,
+    fares,
+    riderId,
+    request,
+  };
+  // A rider only ever books against their latest quote.
+  for (const [id, q] of quotes) if (q.riderId === riderId) quotes.delete(id);
+  quotes.set(stored.id, stored);
+  return stored;
+}
+
+function latestQuote(riderId: string): StoredQuote | undefined {
+  for (const q of quotes.values()) if (q.riderId === riderId) return q;
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
 // Queries
 
 const isOnline = (id: string) => (devices.get(id)?.sockets.size ?? 0) > 0;
@@ -129,6 +219,8 @@ const isDriving = (driverId: string) => devices.get(driverId)?.driving ?? false;
 /** Driving, with room for another ride. Doesn't care whether the phone is connected right now. */
 const canTakeRides = (driverId: string) => isDriving(driverId) && jobs(driverId).length < MAX_RIDES_PER_DRIVER;
 
+const isAvailable = (driverId: string) => isOnline(driverId) && canTakeRides(driverId);
+
 const currentRound = (ride: Ride) => ride.rounds[ride.rounds.length - 1];
 
 function riderRide(riderId: string): Ride | undefined {
@@ -141,7 +233,7 @@ function riderRide(riderId: string): Ride | undefined {
 
 function availableDrivers(): string[] {
   return [...devices.values()]
-    .filter((d) => d.profile.role === 'driver' && isOnline(d.profile.id) && canTakeRides(d.profile.id))
+    .filter((d) => d.profile.role === 'driver' && isAvailable(d.profile.id))
     .map((d) => d.profile.id);
 }
 
@@ -154,7 +246,9 @@ const riderName = (ride: Ride) => devices.get(ride.riderId)?.profile.name ?? 'Ri
 function snapshotFor(profile: DeviceProfile): Snapshot {
   if (profile.role === 'rider') {
     const ride = riderRide(profile.id);
-    if (!ride) return { role: 'rider', ride: null };
+    const q = latestQuote(profile.id);
+    const quoteView = q ? { id: q.id, destinationId: q.destinationId, surge: q.surge, expiresAt: q.expiresAt, fares: q.fares } : null;
+    if (!ride) return { role: 'rider', ride: null, quote: quoteView };
     const round = currentRound(ride);
     const driver = ride.winnerId ? driverProfile(ride.winnerId) : null;
     return {
@@ -180,6 +274,7 @@ function snapshotFor(profile: DeviceProfile): Snapshot {
         },
         completedAt: ride.completedAt,
       },
+      quote: quoteView,
     };
   }
 
@@ -199,12 +294,21 @@ function snapshotFor(profile: DeviceProfile): Snapshot {
             durationSeconds: r.request.durationSeconds,
             round: round.number,
             price: round.price,
+            earnings: earningsFor(round.price, pricing),
             closesAt: round.closesAt,
             declined: round.declined.has(profile.id),
           };
         });
   const jobView = (ride: Ride | undefined) =>
-    ride ? { rideId: ride.id, riderName: riderName(ride), destination: ride.request.destination, fare: ride.fare! } : null;
+    ride
+      ? {
+          rideId: ride.id,
+          riderName: riderName(ride),
+          destination: ride.request.destination,
+          fare: ride.fare!,
+          earnings: earningsFor(ride.fare!, pricing),
+        }
+      : null;
   return {
     role: 'driver',
     driving: isDriving(profile.id),
@@ -234,8 +338,18 @@ class DispatchError extends Error {}
 // ---------------------------------------------------------------------------
 // Auction
 
-function requestRide(riderId: string, request: RideRequest): Ride {
-  if (!(request.quotedFare > 0)) throw new DispatchError('Invalid fare');
+function requestRide(riderId: string, quoteId: string, rideTypeId: string): Ride {
+  const q = quotes.get(quoteId);
+  if (!q || q.riderId !== riderId || q.expiresAt <= Date.now()) {
+    // Hand the rider fresh prices to confirm, rather than booking at old ones.
+    const latest = latestQuote(riderId);
+    if (latest) quote(riderId, latest.request);
+    throw new DispatchError('Prices have changed. Check the new price and try again.');
+  }
+  const quotedFare = q.fares[rideTypeId];
+  if (!(quotedFare > 0)) throw new DispatchError('That ride type isn’t available here');
+  const request: RideRequest = { ...q.request, rideTypeId, quotedFare, surge: q.surge };
+
   const existing = riderRide(riderId);
   if (existing && (existing.status === 'auction' || existing.status === 'matched')) {
     throw new DispatchError('You already have a ride in progress');
@@ -258,7 +372,9 @@ function requestRide(riderId: string, request: RideRequest): Ride {
     timer: null,
   };
   rides.set(ride.id, ride);
-  log(`${ride.id} requested by ${riderId}, quoted $${request.quotedFare.toFixed(2)}`);
+  quotes.delete(q.id);
+  requestLog.push({ at: Date.now(), zone: zoneOf(request.pickup, pricing.surge) });
+  log(`${ride.id} requested by ${riderId}, ${rideTypeId} quoted $${quotedFare.toFixed(2)}${q.surge > 1 ? ` (surge ${q.surge}×)` : ''}`);
   startRound(ride);
   return ride;
 }
@@ -358,9 +474,13 @@ function handle(device: Device, message: ClientMessage) {
   switch (message.type) {
     case 'hello':
       return; // handled at connection time
+    case 'requestQuote':
+      if (role !== 'rider') throw new DispatchError('Only riders can get quotes');
+      quote(id, message.request);
+      return;
     case 'requestRide':
       if (role !== 'rider') throw new DispatchError('Only riders can request rides');
-      requestRide(id, message.request);
+      requestRide(id, message.quoteId, message.rideTypeId);
       return;
     case 'cancelRide': {
       const ride = riderRide(id);
@@ -401,7 +521,7 @@ function handle(device: Device, message: ClientMessage) {
       if (!current || current.id !== message.rideId) throw new DispatchError('That isn’t your current trip');
       current.status = 'completed';
       current.completedAt = new Date().toISOString();
-      lastResults.set(id, { rideId: current.id, outcome: 'completed', fare: current.fare! });
+      lastResults.set(id, { rideId: current.id, outcome: 'completed', earnings: earningsFor(current.fare!, pricing) });
       log(`${current.id} completed by ${id}`);
       // Room for another ride again.
       inviteToOpenRounds(id);
@@ -415,6 +535,11 @@ function handle(device: Device, message: ClientMessage) {
       // Starting joins rounds already open; stopping may leave a round with nobody to wait on.
       if (message.driving) inviteToOpenRounds(id);
       else endOpenRoundsIfEveryonePassed();
+      return;
+    }
+    case 'setPosition': {
+      if (role !== 'driver') return;
+      device.position = message.position;
       return;
     }
   }
@@ -432,12 +557,19 @@ function inviteToOpenRounds(driverId: string) {
 // ---------------------------------------------------------------------------
 // HTTP: state inspection and test control
 
-function reset(overrides: Partial<AuctionPolicy>) {
+function reset(overrides: Partial<AuctionPolicy>, pricingOverrides: PricingOverrides) {
   const next = { ...DEFAULT_POLICY, ...overrides };
   validatePolicy(next);
+  const nextPricing = mergePricing(STARTUP_PRICING, pricingOverrides);
+  const problem = validatePricing(nextPricing);
+  if (problem) throw new DispatchError(problem);
   for (const ride of rides.values()) if (ride.timer) clearTimeout(ride.timer);
   rides.clear();
   lastResults.clear();
+  quotes.clear();
+  requestLog = [];
+  surgeCache.clear();
+  pricing = nextPricing;
   // Phones say whether they're driving when they connect; start everyone off the road.
   for (const device of devices.values()) device.driving = false;
   nextRideId = 1;
@@ -448,18 +580,22 @@ function reset(overrides: Partial<AuctionPolicy>) {
 function publicState() {
   return {
     policy,
-    devices: [...devices.values()].map(({ profile }) => ({
+    pricing,
+    devices: [...devices.values()].map(({ profile, position }) => ({
       ...profile,
       online: isOnline(profile.id),
       driving: profile.role === 'driver' && isDriving(profile.id),
       jobs: profile.role === 'driver' ? jobs(profile.id).map((ride) => ride.id) : [],
+      position,
     })),
     rides: [...rides.values()].map((r) => ({
       id: r.id,
       riderId: r.riderId,
       status: r.status,
       destination: r.request.destination.title,
+      rideTypeId: r.request.rideTypeId,
       quotedFare: r.request.quotedFare,
+      surge: r.request.surge,
       pickup: r.request.pickup,
       rounds: r.rounds.map((round) => ({ ...round, declined: [...round.declined] })),
       winnerId: r.winnerId,
@@ -489,7 +625,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse) {
 
     if (req.method === 'POST' && url.pathname === '/test/reset') {
       const body = await readJson(req);
-      reset((body.policy ?? {}) as Partial<AuctionPolicy>);
+      reset((body.policy ?? {}) as Partial<AuctionPolicy>, (body.pricing ?? {}) as PricingOverrides);
       broadcast();
       return json(200, publicState());
     }
@@ -530,7 +666,7 @@ wss.on('connection', (socket) => {
       const known = devices.get(message.device.id);
       const sockets = known?.sockets ?? new Set<WebSocket>();
       sockets.add(socket);
-      device = { profile: message.device, sockets, driving: known?.driving ?? false };
+      device = { profile: message.device, sockets, driving: known?.driving ?? false, position: known?.position ?? null };
       devices.set(message.device.id, device);
       if (message.device.role === 'driver') inviteToOpenRounds(message.device.id);
       log(`${message.device.role} ${message.device.id} connected`);
@@ -561,4 +697,6 @@ function log(message: string) {
 }
 
 validatePolicy(DEFAULT_POLICY);
+const startupProblem = validatePricing(STARTUP_PRICING);
+if (startupProblem) throw new Error(`Invalid pricing: ${startupProblem}`);
 server.listen(PORT, () => log(`listening on :${PORT}, policy ${JSON.stringify(DEFAULT_POLICY)}`));

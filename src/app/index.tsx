@@ -16,6 +16,7 @@ export default function HomeScreen() {
     route,
     routeLoading,
     rideTypeId,
+    quote,
     dispatchError,
     setDestination,
     setRideTypeId,
@@ -42,7 +43,7 @@ export default function HomeScreen() {
       <View style={[styles.top, { paddingTop: insets.top + 8 }]}>
         {destination ? (
           <View style={styles.row}>
-            <Pressable style={styles.circleButton} onPress={clearDestination} accessibilityLabel="Clear destination">
+            <Pressable style={styles.circleButton} onPress={clearDestination} accessibilityLabel="Clear destination" testID="clear-destination">
               <Text style={styles.circleButtonText}>←</Text>
             </Pressable>
             <View style={[styles.searchBar, styles.flex]}>
@@ -77,7 +78,7 @@ export default function HomeScreen() {
 
       {destination && (
         <View style={styles.bottom}>
-          <RideOptions route={route} loading={routeLoading} selectedId={rideTypeId} onSelect={setRideTypeId} onConfirm={confirmRide} />
+          <RideOptions route={route} quote={quote} loading={routeLoading} selectedId={rideTypeId} onSelect={setRideTypeId} onConfirm={confirmRide} />
         </View>
       )}
     </View>

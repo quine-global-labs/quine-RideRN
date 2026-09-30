@@ -3,7 +3,7 @@ import { scaled } from '../support/pace';
 import { alice, james, maria } from '../support/phones';
 
 export default defineScenario('raises the price when a round runs out of time', () => {
-  cy.resetDispatch({ roundDurationMs: 3000 });
+  cy.resetDispatch({ policy: { roundDurationMs: 3000 } });
   cy.openPhones([alice, maria, james]);
   cy.requestRide('alice', 'ferry', 'Ferry Building');
 
