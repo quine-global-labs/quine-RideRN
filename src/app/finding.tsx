@@ -107,6 +107,11 @@ function Matched({ ride }: { ride: RiderRideView }) {
         </View>
         <Text style={styles.plate}>{driver.plate}</Text>
       </View>
+      {ride.driverFinishingTrip && (
+        <Text style={[styles.muted, styles.centered]} testID="driver-finishing">
+          {driver.name} is finishing a nearby trip, then heading to you
+        </Text>
+      )}
     </>
   );
 }

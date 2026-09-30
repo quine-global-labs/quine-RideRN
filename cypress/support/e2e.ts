@@ -12,6 +12,10 @@ export type PhoneSpec = {
   car?: string;
   plate?: string;
   rating?: number;
+  /** Where the phone's mocked GPS puts it; downtown San Francisco if left out. */
+  location?: { latitude: number; longitude: number };
+  /** Drivers only: start in driving mode (the default) or offline. */
+  driving?: boolean;
 };
 
 /**
@@ -24,13 +28,14 @@ export const defineScenario = (title: string, run: () => void): Scenario => ({ t
 
 export type DispatchState = {
   policy: AuctionPolicy;
-  devices: (PhoneSpec & { online: boolean; busy: boolean })[];
+  devices: (PhoneSpec & { online: boolean; driving: boolean; jobs: string[] })[];
   rides: {
     id: string;
     riderId: string;
     status: 'auction' | 'matched' | 'completed' | 'unmatched' | 'cancelled';
     destination: string;
     quotedFare: number;
+    pickup: { latitude: number; longitude: number };
     rounds: {
       number: number;
       price: number;
@@ -75,6 +80,10 @@ declare global {
       pausePhone(id: string): Chainable<void>;
       /** Send the phone's queued messages in order, then deliver what it missed. */
       resumePhone(id: string): Chainable<void>;
+      /** Driver taps Start driving, and dispatch has registered it. */
+      startDriving(driverId: string): Chainable<void>;
+      /** Driver taps Go offline, and dispatch has registered it. */
+      goOffline(driverId: string): Chainable<void>;
     }
   }
 }
@@ -122,9 +131,20 @@ Cypress.Commands.add('waitForDispatch', (check, description) => {
 });
 
 Cypress.Commands.add('openPhones', (phones) => {
-  const specs = phones.map((p) =>
-    [p.role, p.id, p.name, p.car ?? '', p.plate ?? '', p.rating ?? ''].map((part) => encodeURIComponent(String(part))).join(':'),
-  );
+  const specs = phones.map((p) => {
+    const options = {
+      car: p.car,
+      plate: p.plate,
+      rating: p.rating,
+      lat: p.location?.latitude,
+      lng: p.location?.longitude,
+      driving: p.driving === false ? 0 : undefined,
+    };
+    const extras = Object.entries(options)
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => `${key}=${value}`);
+    return [p.role, p.id, p.name, ...extras].map((part) => encodeURIComponent(String(part))).join(':');
+  });
   cy.visit(`/sim.html?phones=${encodeURIComponent(specs.join(','))}`);
 
   // The first load can wait on Metro compiling the web bundle.
@@ -135,12 +155,13 @@ Cypress.Commands.add('openPhones', (phones) => {
       expect(body?.contentDocument?.querySelector(ready), `${p.id} rendered`).to.exist;
     }
   });
+  const drives = (p: PhoneSpec) => p.role === 'driver' && p.driving !== false;
   for (const p of phones) {
-    if (p.role === 'driver') cy.phone(p.id).find(tid('driver-status')).should('have.text', 'Online');
+    if (p.role === 'driver') cy.phone(p.id).find(tid('driver-status')).should('have.text', drives(p) ? 'Driving' : 'Offline');
   }
   cy.waitForDispatch(
-    (state) => phones.every((p) => state.devices.some((d) => d.id === p.id && d.online)),
-    'all phones connected',
+    (state) => phones.every((p) => state.devices.some((d) => d.id === p.id && d.online && d.driving === drives(p))),
+    'all phones connected, drivers in their starting mode',
   );
 });
 
@@ -210,3 +231,15 @@ Cypress.Commands.add('resumePhone', (id) => {
   dispatchLink(id).then((link) => link.release());
   markPaused(id, false);
 });
+
+function setDriving(driverId: string, driving: boolean) {
+  cy.phone(driverId).find(tid(driving ? 'start-driving' : 'stop-driving')).click();
+  cy.phone(driverId).find(tid('driver-status')).should('have.text', driving ? 'Driving' : 'Offline');
+  cy.waitForDispatch(
+    (state) => state.devices.some((d) => d.id === driverId && d.driving === driving),
+    `${driverId} ${driving ? 'driving' : 'offline'}`,
+  );
+}
+
+Cypress.Commands.add('startDriving', (driverId) => setDriving(driverId, true));
+Cypress.Commands.add('goOffline', (driverId) => setDriving(driverId, false));

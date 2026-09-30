@@ -1,7 +1,8 @@
 // Development dispatch server: matches riders to drivers with a rising-price auction.
 //
-// When a rider requests a ride, every online, idle driver is offered the same suggested
-// fare and can accept or pass. The first driver to accept wins the ride at that price.
+// When a rider requests a ride, every online driver in driving mode with room for another
+// ride (a driver can have one ride in progress and one queued) is offered the same
+// suggested fare and can accept or pass. The first driver to accept wins the ride at that price.
 // If the round ends with no taker (everyone passed, or time ran out), a new round opens
 // at a higher price, until a driver accepts or the price cap is reached. Prices, step,
 // cap and round length come from the auction policy (see AuctionPolicy).
@@ -27,6 +28,9 @@ import type {
 } from '../src/lib/dispatch/protocol';
 
 const PORT = Number(process.env.PORT ?? 8787);
+
+/** The ride in progress plus one queued: a driver on a trip can line up their next ride. */
+const MAX_RIDES_PER_DRIVER = 2;
 
 // Placeholder pricing until there's a real model: start at 80% of the quote and add 5%
 // of it per round, up to the quote itself, so the rider never pays more than quoted.
@@ -59,13 +63,20 @@ type Ride = {
   rounds: Round[];
   winnerId: string | null;
   fare: number | null;
+  /** When a driver accepted; orders a driver's rides into in progress, then queued. */
+  matchedAt: number | null;
   completedAt: string | null;
   /** The rider has dismissed this ride; it no longer shows up in their snapshot. */
   acked: boolean;
   timer: ReturnType<typeof setTimeout> | null;
 };
 
-type Device = { profile: DeviceProfile; sockets: Set<WebSocket> };
+type Device = {
+  profile: DeviceProfile;
+  sockets: Set<WebSocket>;
+  /** Drivers only: in driving mode, i.e. taking ride requests. */
+  driving: boolean;
+};
 
 let policy: AuctionPolicy = { ...DEFAULT_POLICY };
 const devices = new Map<string, Device>();
@@ -106,12 +117,17 @@ function roundPrice(ride: Ride, number: number): { price: number; final: boolean
 
 const isOnline = (id: string) => (devices.get(id)?.sockets.size ?? 0) > 0;
 
-function currentJob(driverId: string): Ride | undefined {
-  for (const ride of rides.values()) if (ride.status === 'matched' && ride.winnerId === driverId) return ride;
-  return undefined;
+/** A driver's matched rides: the one in progress first, then the queued one. */
+function jobs(driverId: string): Ride[] {
+  return [...rides.values()]
+    .filter((ride) => ride.status === 'matched' && ride.winnerId === driverId)
+    .sort((a, b) => a.matchedAt! - b.matchedAt!);
 }
 
-const isBusy = (driverId: string) => currentJob(driverId) !== undefined;
+const isDriving = (driverId: string) => devices.get(driverId)?.driving ?? false;
+
+/** Driving, with room for another ride. Doesn't care whether the phone is connected right now. */
+const canTakeRides = (driverId: string) => isDriving(driverId) && jobs(driverId).length < MAX_RIDES_PER_DRIVER;
 
 const currentRound = (ride: Ride) => ride.rounds[ride.rounds.length - 1];
 
@@ -125,7 +141,7 @@ function riderRide(riderId: string): Ride | undefined {
 
 function availableDrivers(): string[] {
   return [...devices.values()]
-    .filter((d) => d.profile.role === 'driver' && isOnline(d.profile.id) && !isBusy(d.profile.id))
+    .filter((d) => d.profile.role === 'driver' && isOnline(d.profile.id) && canTakeRides(d.profile.id))
     .map((d) => d.profile.id);
 }
 
@@ -155,6 +171,7 @@ function snapshotFor(profile: DeviceProfile): Snapshot {
         price: round.price,
         closesAt: round.closesAt,
         fare: ride.fare,
+        driverFinishingTrip: ride.winnerId !== null && jobs(ride.winnerId)[0] !== ride && ride.status === 'matched',
         driver: driver && {
           name: driver.name,
           rating: driver.rating ?? 5,
@@ -166,8 +183,8 @@ function snapshotFor(profile: DeviceProfile): Snapshot {
     };
   }
 
-  const job = currentJob(profile.id);
-  const offers = job
+  const [job, nextJob] = jobs(profile.id);
+  const offers = !canTakeRides(profile.id)
     ? []
     : [...rides.values()]
         .filter((r) => r.status === 'auction' && currentRound(r).invited.includes(profile.id))
@@ -186,10 +203,14 @@ function snapshotFor(profile: DeviceProfile): Snapshot {
             declined: round.declined.has(profile.id),
           };
         });
+  const jobView = (ride: Ride | undefined) =>
+    ride ? { rideId: ride.id, riderName: riderName(ride), destination: ride.request.destination, fare: ride.fare! } : null;
   return {
     role: 'driver',
+    driving: isDriving(profile.id),
     offers,
-    job: job ? { rideId: job.id, riderName: riderName(job), destination: job.request.destination, fare: job.fare! } : null,
+    job: jobView(job),
+    nextJob: jobView(nextJob),
     lastResult: lastResults.get(profile.id) ?? null,
   };
 }
@@ -231,6 +252,7 @@ function requestRide(riderId: string, request: RideRequest): Ride {
     rounds: [],
     winnerId: null,
     fare: null,
+    matchedAt: null,
     completedAt: null,
     acked: false,
     timer: null,
@@ -261,17 +283,19 @@ function startRound(ride: Ride) {
   }, ride.policy.roundDurationMs);
   log(`${ride.id} round ${number}${final ? ' (final)' : ''} at $${price.toFixed(2)}, offered to [${round.invited.join(', ')}]`);
   // With nobody to ask, the round still runs its clock: a driver may come online meanwhile.
-  if (round.invited.length > 0) endRoundIfEveryonePassed(ride);
+  endRoundIfEveryonePassed(ride);
 }
 
-/** Drivers in the current round who are still available and haven't passed. */
+/** Drivers in the current round who can still take the ride and haven't passed. */
 function undecidedDrivers(ride: Ride): string[] {
   const round = currentRound(ride);
-  return round.invited.filter((id) => !round.declined.has(id) && !isBusy(id));
+  return round.invited.filter((id) => !round.declined.has(id) && canTakeRides(id));
 }
 
 function endRoundIfEveryonePassed(ride: Ride) {
-  if (ride.status === 'auction' && undecidedDrivers(ride).length === 0) endRound(ride);
+  if (ride.status !== 'auction') return;
+  // A round nobody was offered just runs its clock; there's no one whose answer to await.
+  if (currentRound(ride).invited.length > 0 && undecidedDrivers(ride).length === 0) endRound(ride);
 }
 
 /** The current round ended with no taker: raise the price, or give up at the cap. */
@@ -298,14 +322,19 @@ function accept(ride: Ride, driverId: string) {
   ride.status = 'matched';
   ride.winnerId = driverId;
   ride.fare = round.price;
+  ride.matchedAt = Date.now();
   lastResults.delete(driverId);
   for (const id of round.invited) {
     if (id !== driverId && !round.declined.has(id)) lastResults.set(id, { rideId: ride.id, outcome: 'lost' });
   }
   log(`${ride.id} accepted by ${driverId} at $${round.price.toFixed(2)} in round ${round.number}`);
 
-  // This driver is busy now, so rounds that were only waiting on them can move on.
-  for (const other of rides.values()) if (other !== ride) endRoundIfEveryonePassed(other);
+  // If that filled this driver up, rounds that were only waiting on them can move on.
+  endOpenRoundsIfEveryonePassed();
+}
+
+function endOpenRoundsIfEveryonePassed() {
+  for (const ride of rides.values()) endRoundIfEveryonePassed(ride);
 }
 
 /** The open round a driver is answering, checked against the round they saw. */
@@ -316,7 +345,8 @@ function roundToAnswer(rideId: string, roundNumber: number, driverId: string): R
   if (round.number !== roundNumber) throw new DispatchError('The price changed; check the new offer');
   if (!round.invited.includes(driverId)) throw new DispatchError('You were not offered this ride');
   if (round.declined.has(driverId)) throw new DispatchError('You already passed on this price');
-  if (isBusy(driverId)) throw new DispatchError('Finish your current trip first');
+  if (!isDriving(driverId)) throw new DispatchError('Start driving to take rides');
+  if (!canTakeRides(driverId)) throw new DispatchError('You already have a ride queued');
   return ride;
 }
 
@@ -367,20 +397,32 @@ function handle(device: Device, message: ClientMessage) {
       return;
     }
     case 'completeTrip': {
-      const ride = rides.get(message.rideId);
-      if (!ride || ride.status !== 'matched' || ride.winnerId !== id) throw new DispatchError('No such trip');
-      ride.status = 'completed';
-      ride.completedAt = new Date().toISOString();
-      lastResults.set(id, { rideId: ride.id, outcome: 'completed', fare: ride.fare! });
-      log(`${ride.id} completed by ${id}`);
+      const [current] = jobs(id);
+      if (!current || current.id !== message.rideId) throw new DispatchError('That isn’t your current trip');
+      current.status = 'completed';
+      current.completedAt = new Date().toISOString();
+      lastResults.set(id, { rideId: current.id, outcome: 'completed', fare: current.fare! });
+      log(`${current.id} completed by ${id}`);
+      // Room for another ride again.
+      inviteToOpenRounds(id);
+      return;
+    }
+    case 'setDriving': {
+      if (role !== 'driver') throw new DispatchError('Only drivers can drive');
+      if (device.driving === message.driving) return;
+      device.driving = message.driving;
+      log(`${id} ${message.driving ? 'started' : 'stopped'} driving`);
+      // Starting joins rounds already open; stopping may leave a round with nobody to wait on.
+      if (message.driving) inviteToOpenRounds(id);
+      else endOpenRoundsIfEveryonePassed();
       return;
     }
   }
 }
 
-/** A driver who comes online mid-round is offered that round too. */
+/** A driver who becomes available mid-round is offered that round too. */
 function inviteToOpenRounds(driverId: string) {
-  if (isBusy(driverId)) return;
+  if (!isOnline(driverId) || !canTakeRides(driverId)) return;
   for (const ride of rides.values()) {
     const round = ride.status === 'auction' ? currentRound(ride) : undefined;
     if (round && !round.invited.includes(driverId)) round.invited.push(driverId);
@@ -396,6 +438,8 @@ function reset(overrides: Partial<AuctionPolicy>) {
   for (const ride of rides.values()) if (ride.timer) clearTimeout(ride.timer);
   rides.clear();
   lastResults.clear();
+  // Phones say whether they're driving when they connect; start everyone off the road.
+  for (const device of devices.values()) device.driving = false;
   nextRideId = 1;
   policy = next;
   log(`reset, policy ${JSON.stringify(policy)}`);
@@ -407,7 +451,8 @@ function publicState() {
     devices: [...devices.values()].map(({ profile }) => ({
       ...profile,
       online: isOnline(profile.id),
-      busy: profile.role === 'driver' && isBusy(profile.id),
+      driving: profile.role === 'driver' && isDriving(profile.id),
+      jobs: profile.role === 'driver' ? jobs(profile.id).map((ride) => ride.id) : [],
     })),
     rides: [...rides.values()].map((r) => ({
       id: r.id,
@@ -415,6 +460,7 @@ function publicState() {
       status: r.status,
       destination: r.request.destination.title,
       quotedFare: r.request.quotedFare,
+      pickup: r.request.pickup,
       rounds: r.rounds.map((round) => ({ ...round, declined: [...round.declined] })),
       winnerId: r.winnerId,
       fare: r.fare,
@@ -481,9 +527,10 @@ wss.on('connection', (socket) => {
     }
 
     if (message.type === 'hello') {
-      const sockets = devices.get(message.device.id)?.sockets ?? new Set<WebSocket>();
+      const known = devices.get(message.device.id);
+      const sockets = known?.sockets ?? new Set<WebSocket>();
       sockets.add(socket);
-      device = { profile: message.device, sockets };
+      device = { profile: message.device, sockets, driving: known?.driving ?? false };
       devices.set(message.device.id, device);
       if (message.device.role === 'driver') inviteToOpenRounds(message.device.id);
       log(`${message.device.role} ${message.device.id} connected`);

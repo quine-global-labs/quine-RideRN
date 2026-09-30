@@ -15,6 +15,27 @@ This setup runs several "phones" at once in one browser, without iOS simulators,
                          Cypress: drives the iframes ─────────┘ cy.request: reset / inspect
 ```
 
+## Two apps: rider and driver
+
+The codebase builds two apps, distributed separately:
+
+| App           | Name            | Bundle ID / package          | Scheme          | Screens                     |
+| ------------- | --------------- | ---------------------------- | --------------- | --------------------------- |
+| Rider (default) | RideRN        | `com.example.ridern`         | `ridern`        | home, search, finding, trip, trips |
+| Driver        | RideRN Driver   | `com.example.ridern.driver`  | `ridern-driver` | driver                      |
+
+`APP_VARIANT=driver` selects the driver app (`app.config.ts`, on top of `app.json`). The root layout guards each app's screens with `Stack.Protected`, so the driver app can't reach rider screens and vice versa; opening a guarded route, including `/` in the driver app, lands on the first allowed screen.
+
+```bash
+npm start                                    # rider app dev server
+npm run start:driver                         # driver app dev server
+npx eas-cli@latest build --profile driver-production   # driver app store build
+```
+
+`eas.json` has `development`, `preview` and `production` profiles for the rider app, and `driver-development`, `driver-preview` and `driver-production` for the driver app.
+
+In the simulator, both apps run from one dev server: each phone's `role` URL parameter picks which app it is.
+
 ## Quick start
 
 ```bash
@@ -41,18 +62,35 @@ Then open <http://localhost:8090/sim.html?phones=rider:alice:Alice,driver:maria:
 The dispatch server runs a rising-price auction in rounds:
 
 1. A rider requests a ride. The fare shown on the ride-options sheet becomes the **quote**.
-2. Round 1 opens. Every driver who is **online and not on a trip** is offered the same **suggested fare** and taps **Accept** or **Pass**. A driver who comes online mid-round is offered that round too.
+2. Round 1 opens. Every **connected driver in driving mode with room for another ride** is offered the same **suggested fare** and taps **Accept** or **Pass**. A driver who becomes available mid-round (starts driving, reconnects, or finishes a trip) is offered that round too.
 3. The **first driver to accept wins** at that round's price, and the auction ends immediately.
-4. A round ends with no taker when every driver in it has passed (or is now on another trip), or when its time runs out.
+4. A round ends with no taker when every driver in it has passed (or has since gone offline or filled up), or when its time runs out.
 5. Then the next round opens at a higher price and is offered again to every available driver, including those who passed.
 6. When a round at the **price cap** ends with no taker, the ride is `unmatched` and the rider sees "No drivers available". With no cap, rounds continue until someone accepts or the rider cancels.
-7. The winning driver taps **Complete trip**. The rider's phone moves to "You've arrived", and the trip is saved to that rider's history.
+7. The winning driver taps **Complete trip**. The rider's phone moves to "You've arrived", and the trip is saved to that rider's history. If the driver has a ride queued, it becomes their current one.
 
 Ride statuses: `auction` → `matched` → `completed`, or `auction` → `unmatched` / `cancelled`.
 
 Each accept or pass names the round it answers. If the price moved on in the meantime, the server rejects it ("The price changed"), so no driver can accept a price they didn't see.
 
 When two drivers accept the same round, **whichever accept reaches the server first wins**. Later ones get "Another driver already took this ride" and are recorded on the round as `lateAccepts`, in arrival order.
+
+### Driving mode
+
+Drivers only get ride requests while in **driving mode**:
+
+- **Offline:** "You're offline" with a **Start driving** button. No requests arrive. The driver app always starts offline.
+- **Driving, no ride:** a "Looking for ride requests" animation.
+- **Driving, on a ride:** turn-by-turn directions to the rider. There's no real routing yet: `src/lib/navigation.ts` holds a simulated route whose steps advance every 5 s.
+
+A ride request can arrive in either driving state. It **interrupts** whatever is on screen: a sheet slides up over the waiting animation or the directions, and the directions stay mounted and keep advancing underneath.
+
+- **Pass** dismisses the sheet and leaves a small "You passed at $X" note. If a later round raises the price, the sheet pops up again.
+- **Accept** while waiting starts that ride: directions to the pickup.
+- **Accept** while on a ride **queues** it as the driver's next ride ("Next: Bob → …"); the current directions carry on untouched. The queued rider sees "James is finishing a nearby trip, then heading to you". A driver can hold **one ride in progress plus one queued** (`MAX_RIDES_PER_DRIVER`); when full, they get no requests until they complete a trip.
+- **Go offline** stops new requests at any time, including from the request sheet. Rides already accepted continue. Going offline mid-round drops the driver from it; starting mid-round joins it.
+
+The phone owns the setting and tells dispatch on every connect (`setDriving`), so a reconnect never silently changes it. `POST /test/reset` sets every driver back to offline until their phone says otherwise.
 
 ### Pricing policy
 
@@ -81,7 +119,7 @@ What each driver sees after a ride is decided:
 | Didn't answer and another driver accepted   | "Another driver took that ride"                 |
 | Didn't answer the final round               | "That request closed before you answered"       |
 | Rider cancelled                             | "The rider cancelled their request"             |
-| Passed                                      | nothing (back to "Waiting for ride requests")   |
+| Passed                                      | nothing (back to what they were doing)          |
 | Won, then completed the trip                | "Trip complete · you earned $X"                 |
 
 ## Pieces
@@ -90,16 +128,22 @@ What each driver sees after a ride is decided:
 | -------------------------------------- | --------------------------------------------------------------------------- |
 | `server/dispatch.mts`                  | Dispatch server: WebSocket for phones, HTTP for state and test control. Run directly by Node (type stripping, no build step). |
 | `src/lib/dispatch/protocol.ts`         | Message and snapshot types shared by the app and the server.                |
-| `src/lib/dispatch/device.ts`           | Who this phone is (from the URL on web) and where dispatch lives.           |
+| `src/lib/dispatch/device.ts`           | Which app this is, who this phone is (from the URL in the simulator), and where dispatch lives. |
 | `src/lib/dispatch/DispatchContext.tsx` | WebSocket client: connects, says hello, reconnects, exposes the latest snapshot. Also the pause hook (below). |
 | `src/lib/dispatch/testHooks.ts`        | Types for the test hooks on each phone's `window`.                           |
 | `src/lib/RideContext.tsx`              | Rider state: `requestRide`, `cancelRide`, `dismissRide` and `completeTrip` go through dispatch. |
 | `src/app/finding.tsx`                  | Rider's auction / driver found / no drivers screen.                         |
-| `src/app/driver.tsx`                   | Driver screen: suggested fare with Accept / Pass, current job, result banner. |
+| `app.config.ts`, `eas.json`            | The two app variants and their build profiles.                              |
+| `metro.config.js`                      | Keys Metro's cache by app variant (see Troubleshooting).                    |
+| `src/app/_layout.tsx`                  | Guards each app's screens with `Stack.Protected`.                           |
+| `src/app/driver.tsx`                   | The driver app: offline / waiting / on-a-ride, ride requests over it, current and queued ride. |
+| `src/components/DriverNavigation.tsx`  | Full-screen turn-by-turn directions that keep running under anything shown on top. |
+| `src/lib/navigation.ts`                | The simulated route to a pickup.                                            |
+| `src/lib/location.ts`                  | The default location: the pickup fallback, and simulated phones' position.  |
 | `src/components/RideMap.tsx` / `.web.tsx` | Native map, and a plain backdrop on web (`react-native-maps` has no web build). |
 | `public/sim.html`                      | The simulator page: phones as iframes plus the live dispatch panel.         |
 | `cypress/support/e2e.ts`               | Custom commands, network fixtures, and `defineScenario`.                    |
-| `cypress/support/phones.ts`            | The shared cast: riders Alice and Bob; drivers Maria, James and Aisha.      |
+| `cypress/support/phones.ts`            | The shared cast: riders Alice, Bob and Carol; drivers Maria, James and Aisha. |
 | `cypress/scenarios/<name>.ts`          | One scenario's steps and assertions.                                        |
 | `cypress/e2e/<name>.cy.ts`             | A thin spec that registers one scenario at normal speed.                    |
 | `cypress/e2e/slow/<name>.cy.ts`        | The same scenario at watching speed.                                        |
@@ -115,15 +159,18 @@ What each driver sees after a ride is decided:
 | `unmatched-at-price-cap`            | Nobody takes the capped price: "No drivers available", then a fresh request starts over at round 1. |
 | `pricing-is-configurable`           | A policy that starts above the quote with no cap is followed, and the rider sees "above your quote". |
 | `rider-cancels`                     | Cancelling withdraws the offer from every driver.                              |
-| `one-ride-per-driver`               | A driver who takes one ride drops out of other auctions, including later rounds. |
+| `offline-drivers-get-no-requests`   | Only drivers in driving mode are asked; starting mid-round joins it, going offline mid-round leaves it. |
+| `offer-interrupts-driving`          | A request interrupts a waiting driver and a driver mid-ride; mid-ride, the directions keep running and accepting queues the ride; completing the trip moves on to it. |
+| `ride-queue-limit`                  | A driver can queue one ride behind the current one; when full they're skipped, and completing a trip lets them back in. |
+| `mocked-location`                   | A phone placed at Union Square uses that position for search, routing and its pickup, with no location prompt. |
 | `simultaneous-accepts`              | Two drivers accept at once: whoever reached dispatch first wins, even if they tapped second. |
 
 ### Protocol
 
 The server is the source of truth. After **every** change, it pushes a full snapshot to every connected device, so clients never have to replay missed events.
 
-- Client → server: `hello`, `requestRide`, `cancelRide`, `ackRide`, `accept`, `decline`, `completeTrip`
-- Server → client: `snapshot` (the rider's current ride, or the driver's offers, job and last result) and `error` (a rejected action, shown on screen)
+- Client → server: `hello`, `requestRide`, `cancelRide`, `ackRide`, `accept`, `decline`, `completeTrip`, `setDriving`
+- Server → client: `snapshot` (the rider's current ride; or the driver's driving mode, offers, current and queued job, and last result) and `error` (a rejected action, shown on screen)
 
 A rider's ride stays in their snapshot until they acknowledge it (`ackRide`: tapping **Done** on the trip screen or **Back** on "No drivers available").
 
@@ -131,15 +178,21 @@ A rider's ride stays in their snapshot until they acknowledge it (`ackRide`: tap
 
 ```
 /sim.html?phones=<spec>,<spec>,...[&dispatch=http://host:8787]
-spec = role:id:name[:car[:plate[:rating]]]
+spec = role:id:name[:key=value...]
 ```
 
-- `role` is `rider` or `driver`. Riders open on `/`, drivers on `/driver`.
+- `role` is `rider` or `driver`: which app the phone runs. Riders open on `/`, drivers on `/driver`.
 - `id` must be unique. Cypress uses it to find the phone (`iframe[data-phone="<id>"]`), and dispatch uses it as the device id.
-- Each part may be URL-encoded, e.g. `driver:maria:Maria:Toyota%20Camry:7KDL294:4.95`.
+- Optional `key=value` parts, in any order:
+  - `car`, `plate`, `rating`: how a driver appears to riders.
+  - `lat`, `lng`: the phone's mocked location (see below).
+  - `driving=0`: start a driver offline. Simulated drivers start in driving mode.
+- Each part may be URL-encoded, e.g. `driver:maria:Maria:car=Toyota%20Camry:plate=7KDL294:driving=0`.
 - `dispatch` defaults to the page's host on port 8787.
 
 A phone reads its identity from its URL once, at startup, before the router rewrites the URL. Because every phone shares one browser origin, trip history and recent places are stored under a per-phone key prefix (`<id>:trips`).
+
+**Location is mocked.** Simulated phones never call the real location API: there's nobody to answer a permission prompt, and the test machine's own position would leak into scenarios. Each phone sits at its `lat`/`lng`, or downtown San Francisco (37.7749, −122.4194) if none is given. That position is the rider's pickup, biases place search, and starts the route. A real device, or the web app opened outside the simulator (no `device` parameter), still uses real GPS. The logic is `simulatedLocation` in `src/lib/dispatch/device.ts`.
 
 **Why iframes on the same origin:** Cypress can only reach into iframes that share the test page's origin. The simulator page is served from `public/` by the Expo dev server, the same origin as the app, for exactly this reason. Don't host it anywhere else.
 
@@ -147,7 +200,7 @@ A phone reads its identity from its URL once, at startup, before the router rewr
 
 | Method and path                 | Purpose                                                                 |
 | ------------------------------- | ----------------------------------------------------------------------- |
-| `GET /state`                    | The policy, devices (online/busy), and every ride with its rounds (price, who was offered it, who passed, who accepted). Used by the simulator panel and by assertions. |
+| `GET /state`                    | The policy, devices (online; drivers also `driving` and their `jobs`), and every ride with its pickup and rounds (price, who was offered it, who passed, who accepted). Used by the simulator panel and by assertions. |
 | `POST /test/reset`              | Clears all rides and results and sets the policy: body `{ "policy": { "startMultiplier": 1.2, "maxMultiplier": null } }`. Fields left out take the server's defaults. Connected phones stay connected. |
 | `POST /test/rides/:id/end-round` | Ends the current round now, as if its time ran out.                   |
 
@@ -201,11 +254,12 @@ Each scenario starts with `cy.resetDispatch()` and opens its own phones, so any 
 | Command                                              | Does                                                                  |
 | ---------------------------------------------------- | --------------------------------------------------------------------- |
 | `cy.resetDispatch(policyOverrides?)`                 | `POST /test/reset` with `TEST_POLICY` plus any overrides. `roundDurationMs` is stretched on slow runs. |
-| `cy.openPhones(phones)`                              | Loads `/sim.html` with those phones and waits until each is on screen and connected to dispatch. |
+| `cy.openPhones(phones)`                              | Loads `/sim.html` with those phones and waits until each is on screen, connected, and (drivers) in its starting mode. A phone spec can set `location` and, for drivers, `driving: false`. |
 | `cy.phone(id)`                                       | Yields that phone's `<body>`. Chain `.find(...)` / `.contains(...)` from it. |
 | `cy.requestRide(riderId, query, placeTitle)`         | Searches, picks the place, taps **Choose UberX**, waits for "Finding your driver". |
 | `cy.accept(driverId, { rider? })`                    | Accepts the suggested fare. Pass `rider` (the rider's name) when the driver has several offers. |
 | `cy.pass(driverId, { rider? })`                      | Passes on the suggested fare.                                         |
+| `cy.startDriving(id)` / `cy.goOffline(id)`           | Taps **Start driving** / **Go offline** and waits until dispatch has registered it. |
 | `cy.pausePhone(id)`                                  | Holds that phone's link to dispatch (see below). The simulator marks it with a dashed amber outline. |
 | `cy.resumePhone(id)`                                 | Sends what the phone queued, in order, then delivers what it missed.  |
 | `cy.dispatchState()`                                 | `GET /state` once.                                                    |
@@ -236,9 +290,9 @@ The hook is `window.__dispatchLink` (`hold()`, `release()`, `held`), set on each
 | Screen              | IDs                                                                                     |
 | ------------------- | --------------------------------------------------------------------------------------- |
 | Home / search       | `where-to`, `destination-input`, `confirm-ride`, `price-<rideTypeId>`, `dispatch-error`  |
-| Rider: finding      | `ride-status`, `round-price`, `round-number`, `cancel-request`, `ride-fare`, `fare-vs-quote`, `matched-driver`, `driver-name`, `unmatched-back` |
+| Rider: finding      | `ride-status`, `round-price`, `round-number`, `cancel-request`, `ride-fare`, `fare-vs-quote`, `matched-driver`, `driver-name`, `driver-finishing`, `unmatched-back` |
 | Rider: trip done    | `ride-status` ("You've arrived"), `trip-done`                                            |
-| Driver              | `driver-status`, `driver-idle`, `driver-error`, `driver-result`, `offer`, `offer-round`, `offer-destination`, `offer-price`, `offer-passed`, `accept-offer`, `decline-offer`, `driver-job`, `job-fare`, `complete-trip` |
+| Driver              | `driver-offline`, `start-driving`, `stop-driving`, `driver-waiting`, `driver-navigation`, `nav-heading`, `nav-instruction`, `next-job`, `driver-status` (`Connecting…` / `Offline` / `Driving`), `driver-error`, `driver-result`, `offer-sheet`, `offer`, `offer-round`, `offer-destination`, `offer-price`, `offer-passed`, `accept-offer`, `decline-offer`, `driver-job`, `job-fare`, `complete-trip` |
 
 When you add UI that a scenario needs to touch, give it a `testID` rather than matching on text or styles.
 
@@ -282,10 +336,11 @@ Use `typeDelayMs()` for any `.type()` a scenario does directly. The pace is set 
 
 Riders now get drivers only through dispatch, so run `npm run dispatch` alongside `npm start`. The app finds the server on the same host as the Metro dev server, port 8787. This works for simulators, emulators and physical devices on the same network. Override it with `EXPO_PUBLIC_DISPATCH_URL=ws://host:port`.
 
-On a device, the app is always a rider (a random device id, named "You"). The driver role is only reachable through the simulator URL.
+Run the driver app with `npm run start:driver`. Outside the simulator, each install gets a random device id; riders are named "You" and drivers "Driver" until there are real accounts.
 
 ## Troubleshooting
 
+- **The rider app shows up when you started the driver app, or the reverse.** The app config is baked into Metro's transform cache. `metro.config.js` keys the cache by `APP_VARIANT` so this shouldn't happen; if it does (say, after changing `app.config.ts`), start once with `--clear`.
 - **Phones are blank in the simulator.** The web bundle failed to build. Open one phone's URL (e.g. `/?device=x`) directly to see the error. If you installed packages while a dev server was running, restart it with `npx expo start --clear`: a stale Metro file map can point at packages that have moved.
 - **"Can't reach dispatch" in the panel, or drivers stuck on "Connecting…".** The dispatch server isn't running, or something else holds port 8787.
 - **`npm run e2e` fails straight away with a port error.** Stop any `npm run dispatch` or `npm run sim:web` you started by hand; the e2e script starts its own.

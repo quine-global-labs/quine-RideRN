@@ -7,8 +7,7 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": false,
-      "bundleIdentifier": "com.example.ridern"
+      "supportsTablet": false
     },
     "android": {
       "adaptiveIcon": {
@@ -17,8 +16,7 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false,
-      "package": "com.example.ridern"
+      "predictiveBackGestureEnabled": false
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -32,7 +30,6 @@
         }
       ]
     ],
-    "scheme": "ridern",
     "experiments": {
       "typedRoutes": true
     }

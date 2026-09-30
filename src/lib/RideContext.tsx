@@ -1,15 +1,14 @@
 import * as Location from 'expo-location';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
+import { simulatedLocation } from './dispatch/device';
 import { useDispatch } from './dispatch/DispatchContext';
 import type { RiderRideView } from './dispatch/protocol';
+import { DEFAULT_LOCATION } from './location';
 import { getRideType, priceFor, RIDE_TYPES } from './rideTypes';
 import { fetchRoute } from './route';
 import { saveTrip } from './storage';
 import type { Coord, Place, Route, Trip } from './types';
-
-// Used as the pickup point when location permission is denied or still pending.
-export const DEFAULT_LOCATION: Coord = { latitude: 37.7749, longitude: -122.4194 };
 
 type LocationStatus = 'pending' | 'granted' | 'denied';
 
@@ -41,8 +40,8 @@ type RideState = {
 const RideContext = createContext<RideState | null>(null);
 
 export function RideProvider({ children }: { children: ReactNode }) {
-  const [userLocation, setUserLocation] = useState<Coord | null>(null);
-  const [locationStatus, setLocationStatus] = useState<LocationStatus>('pending');
+  const [userLocation, setUserLocation] = useState<Coord | null>(simulatedLocation);
+  const [locationStatus, setLocationStatus] = useState<LocationStatus>(simulatedLocation ? 'granted' : 'pending');
   const [destination, setDestination] = useState<Place | null>(null);
   const [route, setRoute] = useState<Route | null>(null);
   const [routeLoading, setRouteLoading] = useState(false);
@@ -57,6 +56,8 @@ export function RideProvider({ children }: { children: ReactNode }) {
   const routeRequest = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    // Simulated phones keep the mocked position they started with.
+    if (simulatedLocation) return;
     let subscription: Location.LocationSubscription | undefined;
     let cancelled = false;
 

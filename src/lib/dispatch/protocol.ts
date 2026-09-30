@@ -62,6 +62,8 @@ export type RiderRideView = {
   closesAt: number;
   fare: number | null;
   driver: Driver | null;
+  /** The matched driver is still on an earlier trip and will come after it. */
+  driverFinishingTrip: boolean;
   completedAt: string | null;
 };
 
@@ -94,7 +96,17 @@ export type DriverResult =
 
 export type Snapshot =
   | { role: 'rider'; ride: RiderRideView | null }
-  | { role: 'driver'; offers: DriverOfferView[]; job: DriverJobView | null; lastResult: DriverResult | null };
+  | {
+      role: 'driver';
+      /** In driving mode, i.e. taking ride requests. */
+      driving: boolean;
+      offers: DriverOfferView[];
+      /** The ride in progress. */
+      job: DriverJobView | null;
+      /** A ride accepted while on `job`, to start once it's done. */
+      nextJob: DriverJobView | null;
+      lastResult: DriverResult | null;
+    };
 
 export type ClientMessage =
   | { type: 'hello'; device: DeviceProfile }
@@ -104,6 +116,8 @@ export type ClientMessage =
   | { type: 'ackRide' }
   | { type: 'accept'; rideId: string; round: number }
   | { type: 'decline'; rideId: string; round: number }
-  | { type: 'completeTrip'; rideId: string };
+  | { type: 'completeTrip'; rideId: string }
+  /** Driver starts or stops taking ride requests. Sent on every (re)connect, too. */
+  | { type: 'setDriving'; driving: boolean };
 
 export type ServerMessage = { type: 'snapshot'; snapshot: Snapshot } | { type: 'error'; message: string };

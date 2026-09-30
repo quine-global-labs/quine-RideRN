@@ -11,7 +11,12 @@
 
         /sim.html?phones=rider:alice:Alice,driver:maria:Maria,driver:james:James
 
-      Phone spec: role:id:name[:car[:plate[:rating]]]  (each part may be URL-encoded)
+      Phone spec: role:id:name[:key=value...]  (each part may be URL-encoded)
+        car, plate, rating  how the driver appears to riders
+        lat, lng            the phone's mocked location (phones never use real GPS;
+                            default downtown San Francisco)
+        driving=0           start a driver offline (drivers start in driving mode)
+      e.g. driver:maria:Maria:plate=7KDL294:driving=0
       Optional: &dispatch=http://host:8787 (defaults to this host, port 8787)
     -->
     <style>
@@ -97,14 +102,21 @@
         .split(',')
         .filter(Boolean)
         .map((spec) => {
-          const [role, id, name, car, plate, rating] = spec.split(':').map(decodeURIComponent);
-          return { role: role === 'driver' ? 'driver' : 'rider', id, name: name || id, car, plate, rating };
+          const [role, id, name, ...extras] = spec.split(':').map(decodeURIComponent);
+          const options = Object.fromEntries(
+            extras.filter(Boolean).map((extra) => {
+              const at = extra.indexOf('=');
+              return at < 0 ? [extra, '1'] : [extra.slice(0, at), extra.slice(at + 1)];
+            }),
+          );
+          return { role: role === 'driver' ? 'driver' : 'rider', id, name: name || id, options };
         });
 
       const main = document.getElementById('phones');
       for (const spec of specs) {
         const query = new URLSearchParams({ device: spec.id, role: spec.role, name: spec.name });
-        for (const key of ['car', 'plate', 'rating']) if (spec[key]) query.set(key, spec[key]);
+        for (const key of ['car', 'plate', 'rating', 'lat', 'lng']) if (spec.options[key]) query.set(key, spec.options[key]);
+        if (spec.role === 'driver') query.set('driving', spec.options.driving === '0' ? '0' : '1');
         const path = spec.role === 'driver' ? '/driver' : '/';
 
         const wrapper = document.createElement('div');
@@ -139,7 +151,14 @@
           body.replaceChildren();
           for (const d of state.devices) {
             const row = el('div', 'device');
-            row.append(el('span', '', `${d.name} (${d.role})`), el('span', '', d.online ? (d.busy ? 'on trip' : 'online') : 'offline'));
+            const status = !d.online
+              ? 'disconnected'
+              : d.role !== 'driver'
+                ? 'online'
+                : [d.driving ? 'driving' : 'offline', d.jobs.length ? `${d.jobs.length} ride${d.jobs.length > 1 ? 's' : ''}` : '']
+                    .filter(Boolean)
+                    .join(' · ');
+            row.append(el('span', '', `${d.name} (${d.role})`), el('span', '', status));
             body.append(row);
           }
           if (state.rides.length === 0) body.append(el('p', 'empty', 'No ride requests yet.'));

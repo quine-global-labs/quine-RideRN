@@ -30,7 +30,8 @@ export default defineScenario('gives the ride to the first driver who accepts, a
 
   cy.phone('james').find(tid('job-fare')).should('have.text', 'Fare $8.80');
   cy.phone('aisha').find(tid('driver-result')).should('have.text', 'Another driver took that ride');
-  cy.phone('maria').find(tid('driver-idle')).should('exist');
+  cy.phone('maria').find(tid('offer-sheet')).should('not.exist');
+  cy.phone('maria').find(tid('driver-waiting')).should('exist');
   cy.phone('maria').find(tid('driver-result')).should('not.exist');
 
   cy.dispatchState().then(({ rides }) => {
